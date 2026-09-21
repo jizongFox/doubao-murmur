@@ -149,6 +149,23 @@ def _x11_set_no_focus_pre_map(window: Gtk.Window) -> None:
     _x11_set_input_hint(surface.get_xid())
 
 
+def _x11_monitor_at_pointer(display: Gdk.Display):
+    """Return the monitor containing the pointer, falling back to the first."""
+    monitors = display.get_monitors()
+    pointer = x11_pointer()
+    if pointer is not None:
+        px, py = pointer
+        for index in range(monitors.get_n_items()):
+            monitor = monitors.get_item(index)
+            geo = monitor.get_geometry()
+            if (
+                geo.x <= px < geo.x + geo.width
+                and geo.y <= py < geo.y + geo.height
+            ):
+                return monitor
+    return monitors.get_item(0) if monitors.get_n_items() else None
+
+
 def _x11_pin_above(window: Gtk.Window, role: OverlayRole, state: dict) -> bool:
     surface = window.get_surface()
     if surface is None or GdkX11 is None or not isinstance(
@@ -181,7 +198,7 @@ def _x11_pin_above(window: Gtk.Window, role: OverlayRole, state: dict) -> bool:
     x = y = None
     if role != OverlayRole.KEYBOARD:
         display = window.get_display()
-        monitor = display.get_monitors().get_item(0) if display else None
+        monitor = _x11_monitor_at_pointer(display) if display else None
         if monitor is not None:
             geo = monitor.get_geometry()
             x = geo.x + (geo.width - width) // 2
