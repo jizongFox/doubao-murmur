@@ -12,7 +12,7 @@ if ! command -v dpkg-deb >/dev/null 2>&1; then
 fi
 
 APP_VERSION=$(sed -n 's/^version = "\([^"]*\)"/\1/p' "$LINUX_DIR/pyproject.toml" | head -n 1)
-DEB_VERSION=${DEB_VERSION:-"${APP_VERSION}+wayland3"}
+DEB_VERSION=${DEB_VERSION:-"${APP_VERSION}+wayland4"}
 PACKAGE_ROOT=$(mktemp -d)
 trap 'rm -rf "$PACKAGE_ROOT"' EXIT HUP INT TERM
 chmod 0755 "$PACKAGE_ROOT"
@@ -49,7 +49,7 @@ Installed-Size: $INSTALLED_SIZE
 Section: utils
 Priority: optional
 Homepage: https://github.com/jizongFox/doubao-murmur
-Depends: python3 (>= 3.11), python3-gi, gir1.2-gtk-4.0, gir1.2-webkit-6.0, python3-websockets, python3-sounddevice, python3-xlib, wl-clipboard, ydotool
+Depends: python3 (>= 3.11), python3-gi, python3-gi-cairo, gir1.2-gtk-4.0, gir1.2-webkit-6.0, python3-websockets, python3-sounddevice, python3-xlib, wl-clipboard, ydotool
 Recommends: xclip, xdotool, x11-utils
 Description: Voice-to-text input using Doubao ASR
  Native Linux client with a global hotkey, recording overlay, clipboard copy,
