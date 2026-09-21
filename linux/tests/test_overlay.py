@@ -1,6 +1,4 @@
-"""Tests for overlay position recovery."""
-
-from types import SimpleNamespace
+"""Tests for overlay position persistence and reset."""
 
 import pytest
 
@@ -8,20 +6,6 @@ pytest.importorskip("gi")
 
 from doubao_murmur.ui import overlay as overlay_module
 from doubao_murmur.ui.overlay import Overlay
-
-
-class _Monitors:
-    def __init__(self, geometries):
-        self._items = [
-            SimpleNamespace(get_geometry=lambda geo=geo: geo)
-            for geo in geometries
-        ]
-
-    def get_n_items(self):
-        return len(self._items)
-
-    def get_item(self, index):
-        return self._items[index]
 
 
 def _overlay_at(x, y):
@@ -32,16 +16,23 @@ def _overlay_at(x, y):
     return overlay
 
 
-def test_saved_position_visibility(monkeypatch):
-    geometries = [SimpleNamespace(x=0, y=0, width=1920, height=1080)]
-    display = SimpleNamespace(get_monitors=lambda: _Monitors(geometries))
-    fake_gdk = SimpleNamespace(
-        Display=SimpleNamespace(get_default=lambda: display)
-    )
-    monkeypatch.setattr(overlay_module, "Gdk", fake_gdk)
+def test_show_keeps_saved_x11_position(monkeypatch):
+    overlay = _overlay_at(4711, 2950)
+    overlay._window = object()
+    overlay._anim_timer = 1
+    overlay._update_content = lambda: None
+    presented = []
 
-    assert _overlay_at(500, 500)._saved_position_is_visible()
-    assert not _overlay_at(5000, 5000)._saved_position_is_visible()
+    monkeypatch.setattr(overlay_module, "using_layer_shell", lambda: False)
+    monkeypatch.setattr(
+        overlay_module,
+        "present_overlay",
+        lambda _window, _role, x=None, y=None: presented.append((x, y)),
+    )
+
+    overlay.show()
+
+    assert presented == [(4711, 2950)]
 
 
 def test_reset_position_removes_saved_file(tmp_path, monkeypatch):

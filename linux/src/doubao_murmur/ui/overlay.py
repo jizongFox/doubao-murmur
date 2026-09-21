@@ -195,14 +195,6 @@ class Overlay:
         if not self._window:
             self._create_window()
         self._update_content()
-        if (
-            not using_layer_shell()
-            and self._saved_x is not None
-            and self._saved_y is not None
-            and not self._saved_position_is_visible()
-        ):
-            logger.info("Saved overlay position is off-screen; resetting")
-            self.reset_position()
         if self._window:
             if using_layer_shell():
                 present_overlay(self._window, OverlayRole.STATUS)
@@ -285,28 +277,6 @@ class Overlay:
         except Exception:
             self._saved_x = None
             self._saved_y = None
-
-    def _saved_position_is_visible(self) -> bool:
-        """Return whether the saved overlay centre is on a connected monitor."""
-        if self._saved_x is None or self._saved_y is None:
-            return False
-        display = Gdk.Display.get_default()
-        if display is None:
-            return True
-        monitors = display.get_monitors()
-        if monitors.get_n_items() == 0:
-            return True
-
-        center_x = self._saved_x + OVERLAY_WIDTH // 2
-        center_y = self._saved_y + OVERLAY_HEIGHT // 2
-        for index in range(monitors.get_n_items()):
-            geo = monitors.get_item(index).get_geometry()
-            if (
-                geo.x <= center_x < geo.x + geo.width
-                and geo.y <= center_y < geo.y + geo.height
-            ):
-                return True
-        return False
 
     def _save_position(self) -> None:
         if not self._window:
