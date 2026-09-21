@@ -123,10 +123,15 @@ class DoubaoMurmurApp(Gtk.Application):
             on_quit_clicked=self._quit,
             on_help_clicked=self._show_help,
             on_keyboard_clicked=self._toggle_keyboard,
+            on_overlay_reset_clicked=self._reset_overlay_position,
         )
         self.tray_icon.start()
 
         logger.info("All components initialized")
+
+    def _reset_overlay_position(self) -> None:
+        if self.overlay:
+            self.overlay.reset_position()
 
     def _toggle_keyboard(self) -> None:
         if not self.keyboard:

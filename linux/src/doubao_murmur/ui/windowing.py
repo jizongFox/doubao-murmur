@@ -449,3 +449,9 @@ def layer_shell_set_margins(window: Gtk.Window, top: int, left: int) -> None:
         return
     LayerShell.set_margin(window, LayerShell.Edge.TOP, top)
     LayerShell.set_margin(window, LayerShell.Edge.LEFT, left)
+
+
+def layer_shell_reset_status_position(window: Gtk.Window) -> None:
+    """Restore the status overlay's default layer-shell position."""
+    if _HAS_LAYER_SHELL and LayerShell is not None:
+        _position_overlay_center_bottom(window)
