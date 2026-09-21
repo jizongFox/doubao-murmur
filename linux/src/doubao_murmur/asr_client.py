@@ -163,18 +163,28 @@ class ASRClient:
         transcribed. The padding is queued at once rather than paced in real time,
         so it costs no extra wall-clock time.
         """
+        chunk_ms = 100
+        silence = bytes(AUDIO_SAMPLE_RATE * 2 * chunk_ms // 1000)
+        silence_chunks = [
+            silence
+            for _ in range(max(1, trailing_silence_ms // chunk_ms))
+        ] if trailing_silence_ms > 0 else []
+
         with self._lock:
-            self._pending_audio.clear()
             ws = self._ws
             was_connected = self._connected
             self._connected = False
 
-        if was_connected and ws and trailing_silence_ms > 0:
+            # If the user stops before the handshake completes, keep the
+            # captured speech and queue the same tail used by the connected
+            # path. _flush_audio_buffer() will send both in order on connect.
+            if not was_connected:
+                self._pending_audio.extend(silence_chunks)
+
+        if was_connected and ws:
             if self._loop and self._loop.is_running():
-                chunk_ms = 100
-                silence = bytes(AUDIO_SAMPLE_RATE * 2 * chunk_ms // 1000)
-                for _ in range(max(1, trailing_silence_ms // chunk_ms)):
-                    asyncio.run_coroutine_threadsafe(ws.send(silence), self._loop)
+                for chunk in silence_chunks:
+                    asyncio.run_coroutine_threadsafe(ws.send(chunk), self._loop)
 
         logger.info(
             "Finished sending audio (+%dms silence), waiting for final results",

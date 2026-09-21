@@ -173,6 +173,17 @@ class TestCookieHeader:
         assert "sid_tt=xyz" in header
 
 
+class TestAudioBuffering:
+    def test_finish_before_connect_preserves_audio_and_queues_silence(self, client):
+        client.send_audio(b"speech")
+
+        client.finish_sending(trailing_silence_ms=200)
+
+        assert client._pending_audio[0] == b"speech"
+        assert len(client._pending_audio) == 3
+        assert all(len(chunk) == 3200 for chunk in client._pending_audio[1:])
+
+
 class TestDependencyHandling:
     def test_header_kwargs_new_websockets(self):
         def connect(*, additional_headers=None):

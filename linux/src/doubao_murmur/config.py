@@ -33,7 +33,7 @@ LOGIN_URL = "https://www.doubao.com/chat"
 AUDIO_SAMPLE_RATE = 16000
 AUDIO_CHANNELS = 1
 AUDIO_DTYPE = "int16"
-AUDIO_BLOCKSIZE = 4096  # samples per callback (~256ms at 16kHz)
+AUDIO_BLOCKSIZE = 1600  # samples per callback (100ms at 16kHz)
 
 # --- Auth error detection ---
 

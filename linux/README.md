@@ -147,11 +147,15 @@ flatpak override --user --device=input com.doubao.Murmur
 **自动粘贴仍然不行**
 
 粘贴依赖 `xdotool`（X11 专用）或 `ydotool`（需要 `ydotoold` 常驻）。
-Wayland 下 xdotool 粘不进原生窗口；装了 ydotool 并启动 `ydotoold` 才能自动粘贴：
+Wayland 下 xdotool 粘不进原生窗口。Ubuntu 26.04 安装的是用户级
+`ydotool.service`，可这样启用：
 
 ```bash
-sudo systemctl enable --now ydotoold
+sudo apt install ydotool
+systemctl --user enable --now ydotool.service
 ```
+
+其他发行版的服务名称和运行方式可能不同，请以发行版的软件包说明为准。
 
 **没装 ydotool 也能用** —— 文字始终会复制到剪贴板，手动 `Ctrl+V` 即可
 （终端里是 `Ctrl+Shift+V`）。

@@ -245,7 +245,7 @@ class Overlay:
     def _status_text(self) -> str:
         state = self.app_state.recording_state
         return {
-            RecordingState.STARTING: "正在启动语音识别...",
+            RecordingState.STARTING: "正在聆听，可直接说话...",
             RecordingState.RECORDING: "正在聆听...",
             RecordingState.STOPPING: "正在处理...",
         }.get(state, "")

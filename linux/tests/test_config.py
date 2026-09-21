@@ -24,7 +24,7 @@ def test_wss_url():
 def test_audio_params():
     assert AUDIO_SAMPLE_RATE == 16000
     assert AUDIO_CHANNELS == 1
-    assert AUDIO_BLOCKSIZE == 4096
+    assert AUDIO_BLOCKSIZE == 1600
 
 
 def test_auth_error_code():
