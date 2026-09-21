@@ -47,6 +47,24 @@ SteamOS 桌面模式自带的虚拟键盘不能移动、不能缩放，常挡住
 
 ## 🚀 安装
 
+### Ubuntu 26.04: `.deb`
+
+从源码构建并安装原生包：
+
+```bash
+cd linux
+make deb
+sudo apt install ./dist/doubao-murmur_*_all.deb
+```
+
+安装不会删除 `~/.config/doubao-murmur/` 中已有的登录信息。Wayland 下首次安装后，
+再完成一次输入权限和自动粘贴设置，然后注销并重新登录：
+
+```bash
+sudo usermod -aG input "$USER"
+systemctl --user enable --now ydotool.service
+```
+
 ### 方法一: Flatpak (推荐)
 
 从 [Releases](../../../../releases) 页面下载 `doubao-murmur.flatpak`：
