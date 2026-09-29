@@ -82,16 +82,29 @@ class TranscriptionManager:
             self._on_auth_error
         )
 
-    # --- Toggle ---
+    # --- Recording controls ---
 
     def handle_toggle(self) -> None:
         """Called on GTK main thread from hotkey manager."""
         state = self.app_state.recording_state
         if state == RecordingState.IDLE:
-            self._start_recording()
+            self.handle_start()
         elif state in (RecordingState.STARTING, RecordingState.RECORDING):
-            self._stop_recording()
+            self.handle_stop()
         # STOPPING: ignore
+
+    def handle_start(self) -> None:
+        """Start recording unless a recording is already in progress."""
+        if self.app_state.recording_state == RecordingState.IDLE:
+            self._start_recording()
+
+    def handle_stop(self) -> None:
+        """Stop only an active or starting recording."""
+        if self.app_state.recording_state in (
+            RecordingState.STARTING,
+            RecordingState.RECORDING,
+        ):
+            self._stop_recording()
 
     def _start_recording(self) -> None:
         if self.app_state.login_status != LoginStatus.LOGGED_IN:

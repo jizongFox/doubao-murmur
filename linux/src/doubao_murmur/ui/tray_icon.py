@@ -19,6 +19,7 @@ gi.require_version("Gtk", "4.0")
 from gi.repository import Gdk, Gtk
 
 from doubao_murmur.app_state import AppState, LoginStatus
+from doubao_murmur.config import RECORDING_MODE_HOLD, RECORDING_MODE_TOGGLE
 from doubao_murmur.ui.sni_tray import SniTray
 
 logger = logging.getLogger(__name__)
@@ -39,6 +40,8 @@ class TrayIcon:
         on_help_clicked=None,
         on_keyboard_clicked=None,
         on_overlay_reset_clicked=None,
+        recording_mode=RECORDING_MODE_TOGGLE,
+        on_recording_mode_changed=None,
     ) -> None:
         self.app_state = app_state
         self._on_login_clicked = on_login_clicked
@@ -47,6 +50,8 @@ class TrayIcon:
         self._on_help_clicked = on_help_clicked
         self._on_keyboard_clicked = on_keyboard_clicked
         self._on_overlay_reset_clicked = on_overlay_reset_clicked
+        self._recording_mode = recording_mode
+        self._on_recording_mode_changed = on_recording_mode_changed
         self._sni: SniTray | None = None
         self._window: Gtk.Window | None = None
         self._status_label: Gtk.Label | None = None
@@ -140,7 +145,7 @@ class TrayIcon:
     def _build_control_window(self) -> None:
         self._window = Gtk.Window()
         self._window.set_title("Doubao Murmur")
-        self._window.set_default_size(320, 180)
+        self._window.set_default_size(420, 280)
         self._window.set_resizable(False)
         self._window.connect("close-request", self._on_control_close)
 
@@ -157,6 +162,31 @@ class TrayIcon:
         self._primary_button = Gtk.Button()
         self._primary_button.connect("clicked", self._on_primary_clicked)
         box.append(self._primary_button)
+
+        mode_label = Gtk.Label(label="录音方式")
+        mode_label.set_xalign(0)
+        mode_label.set_margin_top(4)
+        box.append(mode_label)
+
+        toggle_mode = Gtk.CheckButton(
+            label="按键切换（按一次开始，再按一次结束）"
+        )
+        hold_mode = Gtk.CheckButton(
+            label="按住说话（按下开始，松开结束）"
+        )
+        hold_mode.set_group(toggle_mode)
+        if self._recording_mode == RECORDING_MODE_HOLD:
+            hold_mode.set_active(True)
+        else:
+            toggle_mode.set_active(True)
+        toggle_mode.connect(
+            "toggled", self._on_recording_mode_toggled, RECORDING_MODE_TOGGLE
+        )
+        hold_mode.connect(
+            "toggled", self._on_recording_mode_toggled, RECORDING_MODE_HOLD
+        )
+        box.append(toggle_mode)
+        box.append(hold_mode)
 
         if self._on_keyboard_clicked:
             keyboard_button = Gtk.Button(label="⌨ 软键盘")
@@ -208,6 +238,13 @@ class TrayIcon:
             self._on_logout_clicked()
         else:
             self._on_login_clicked()
+
+    def _on_recording_mode_toggled(self, button, mode: str) -> None:
+        if not button.get_active() or mode == self._recording_mode:
+            return
+        self._recording_mode = mode
+        if self._on_recording_mode_changed:
+            self._on_recording_mode_changed(mode)
 
     def show_window(self) -> None:
         """Present the control window (tray click / app re-activation)."""

@@ -4,7 +4,7 @@
 
 - **macOS**：按下右 `⌥ Option` 键开始/停止语音识别，识别结果自动复制到剪贴板并粘贴到当前光标所在的输入框。
 - **Windows**：按下右 `Alt` 键开始/停止，用法与 macOS 一致；托盘菜单里可以把热键换成右 Ctrl / 右 Shift 等。详见 [Windows 版说明](windows/README.md)。
-- **Linux / SteamOS**：按下右 `Alt` 键开始/停止；掌机上可在 Steam Input 桌面布局中把任意手柄按键（如 R3/R2）映射为右 Alt，即可**用手柄一键语音输入**。另外还内置了 **SteamOS 桌面模式的触摸软键盘**——可拖动 / 可缩放，并支持**分体**与**左 / 右单手**布局，方便掌机握持时打字。详见 [Linux 版说明](linux/README.md)。
+- **Linux / SteamOS**：右 `Alt` 支持“按一次开始、再按一次结束”和“按住说话、松开结束”两种模式；掌机上可在 Steam Input 桌面布局中把任意手柄按键（如 R3/R2）映射为右 Alt，即可**用手柄一键语音输入**。另外还内置了 **SteamOS 桌面模式的触摸软键盘**——可拖动 / 可缩放，并支持**分体**与**左 / 右单手**布局，方便掌机握持时打字。详见 [Linux 版说明](linux/README.md)。
 
 <p align="center">
   <img src="docs/screenshots/overlay_pannel.png" width="500" alt="语音识别悬浮窗">
@@ -70,7 +70,7 @@ flatpak run com.doubao.Murmur
 |------|------------|------|
 | macOS | 右 `⌥ Option` | `ESC` |
 | Windows | 右 `Alt`（可在托盘菜单改成右 Ctrl / 右 Shift / Scroll Lock / Pause） | `ESC` |
-| Linux / SteamOS | 右 `Alt` | `ESC` |
+| Linux / SteamOS | 右 `Alt`（可选按键切换或按住说话） | `ESC` |
 
 取消是指放弃本次识别，不复制也不粘贴。
 

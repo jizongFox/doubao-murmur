@@ -3,8 +3,12 @@
 Mirrors the fixed parameters from the macOS DoubaoASRClient.swift.
 """
 
+import json
+import logging
 import os
 from pathlib import Path
+
+logger = logging.getLogger(__name__)
 
 # --- Doubao ASR WebSocket ---
 
@@ -48,6 +52,11 @@ CONFIG_DIR_NAME = "doubao-murmur"
 PARAMS_FILE = "asr_params.json"
 KEYBOARD_FILE = "keyboard.json"
 OVERLAY_FILE = "overlay.json"
+SETTINGS_FILE = "settings.json"
+
+RECORDING_MODE_TOGGLE = "toggle"
+RECORDING_MODE_HOLD = "hold"
+RECORDING_MODES = {RECORDING_MODE_TOGGLE, RECORDING_MODE_HOLD}
 
 
 def get_config_dir() -> Path:
@@ -73,6 +82,35 @@ def get_keyboard_config_path() -> Path:
 def get_overlay_config_path() -> Path:
     """Get the path to the overlay window position JSON file."""
     return get_config_dir() / OVERLAY_FILE
+
+
+def get_settings_path() -> Path:
+    """Get the path to user-facing application settings."""
+    return get_config_dir() / SETTINGS_FILE
+
+
+def load_recording_mode() -> str:
+    """Load the recording mode, preserving toggle as the default."""
+    path = get_settings_path()
+    if not path.exists():
+        return RECORDING_MODE_TOGGLE
+    try:
+        mode = json.loads(path.read_text(encoding="utf-8")).get(
+            "recording_mode"
+        )
+        if mode in RECORDING_MODES:
+            return mode
+    except (OSError, ValueError, AttributeError) as e:
+        logger.warning("Could not load settings: %s", e)
+    return RECORDING_MODE_TOGGLE
+
+
+def save_recording_mode(mode: str) -> None:
+    """Persist the selected recording mode."""
+    if mode not in RECORDING_MODES:
+        raise ValueError(f"Unknown recording mode: {mode}")
+    data = json.dumps({"recording_mode": mode}, indent=2)
+    get_settings_path().write_text(data, encoding="utf-8")
 
 
 # --- Timeouts ---

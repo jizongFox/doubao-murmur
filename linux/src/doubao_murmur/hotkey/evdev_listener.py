@@ -2,7 +2,7 @@
 
 OPTIONAL input method. Requires user to be in the 'input' group.
 Listens for:
-- Right Alt (KEY_RIGHTALT=100) press-and-release -> toggle
+- Right Alt (KEY_RIGHTALT=100) press and release
 - ESC (KEY_ESC=1) -> cancel
 """
 
@@ -30,8 +30,9 @@ EVENT_FORMAT = "llHHi"
 class EvdevListener:
     """Reads /dev/input/event* devices for global hotkeys."""
 
-    def __init__(self, on_toggle, on_escape) -> None:
-        self.on_toggle = on_toggle
+    def __init__(self, on_record_press, on_record_release, on_escape) -> None:
+        self.on_record_press = on_record_press
+        self.on_record_release = on_record_release
         self.on_escape = on_escape
         self._thread: threading.Thread | None = None
         self._running = False
@@ -117,25 +118,25 @@ class EvdevListener:
                         if ev_type != EV_KEY:
                             continue
 
-                        if ev_code == KEY_RIGHTALT:
-                            if ev_value == 1:  # press
-                                self._right_alt_down = True
-                                self._other_key_pressed = False
-                            elif ev_value == 0:  # release
-                                if (
-                                    self._right_alt_down
-                                    and not self._other_key_pressed
-                                ):
-                                    self.on_toggle()
-                                self._right_alt_down = False
-                        elif ev_code != KEY_RIGHTALT and ev_value == 1:
-                            if self._right_alt_down:
-                                self._other_key_pressed = True
-                            if ev_code == KEY_ESC:
-                                self.on_escape()
+                        self._handle_key(ev_code, ev_value)
         finally:
             for fd in fds:
                 try:
                     os.close(fd)
                 except OSError:
                     pass
+
+    def _handle_key(self, keycode: int, value: int) -> None:
+        if keycode == KEY_RIGHTALT:
+            if value == 1 and not self._right_alt_down:  # press
+                self._right_alt_down = True
+                self._other_key_pressed = False
+                self.on_record_press()
+            elif value == 0 and self._right_alt_down:  # release
+                self.on_record_release(not self._other_key_pressed)
+                self._right_alt_down = False
+        elif value == 1:
+            if self._right_alt_down:
+                self._other_key_pressed = True
+            if keycode == KEY_ESC:
+                self.on_escape()

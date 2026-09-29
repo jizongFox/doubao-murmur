@@ -13,6 +13,11 @@ gi.require_version("Gtk", "4.0")
 from gi.repository import Gio, GLib, Gtk
 
 from doubao_murmur.app_state import AppState, LoginStatus
+from doubao_murmur.config import (
+    RECORDING_MODE_HOLD,
+    load_recording_mode,
+    save_recording_mode,
+)
 from doubao_murmur.hotkey.evdev_listener import EvdevListener
 from doubao_murmur.hotkey.manager import HotkeyManager
 from doubao_murmur.hotkey.x11_listener import X11KeyListener
@@ -36,6 +41,7 @@ class DoubaoMurmurApp(Gtk.Application):
             flags=Gio.ApplicationFlags.FLAGS_NONE,
         )
         self.app_state = AppState()
+        self.recording_mode = load_recording_mode()
         self.login_window: LoginWindow | None = None
         self.overlay: Overlay | None = None
         self.tray_icon: TrayIcon | None = None
@@ -83,8 +89,10 @@ class DoubaoMurmurApp(Gtk.Application):
         self.overlay.on_cancel = self.transcription_manager.handle_cancel
 
         # 4. Create hotkey manager
-        self.hotkey_manager = HotkeyManager()
+        self.hotkey_manager = HotkeyManager(self.recording_mode)
         self.hotkey_manager.on_toggle = self.transcription_manager.handle_toggle
+        self.hotkey_manager.on_start = self.transcription_manager.handle_start
+        self.hotkey_manager.on_stop = self.transcription_manager.handle_stop
         self.hotkey_manager.on_cancel = self.transcription_manager.handle_cancel
         self.hotkey_manager.on_keyboard = self._toggle_keyboard
 
@@ -96,13 +104,15 @@ class DoubaoMurmurApp(Gtk.Application):
         evdev = None
         if X11KeyListener.is_available():
             x11 = X11KeyListener(
-                on_toggle=self.hotkey_manager.trigger_toggle,
+                on_record_press=self.hotkey_manager.trigger_record_press,
+                on_record_release=self.hotkey_manager.trigger_record_release,
                 on_escape=self.hotkey_manager.trigger_cancel,
                 on_keyboard=self.hotkey_manager.trigger_keyboard,
             )
         if EvdevListener.is_available():
             evdev = EvdevListener(
-                on_toggle=self.hotkey_manager.trigger_toggle,
+                on_record_press=self.hotkey_manager.trigger_record_press,
+                on_record_release=self.hotkey_manager.trigger_record_release,
                 on_escape=self.hotkey_manager.trigger_cancel,
             )
 
@@ -124,6 +134,8 @@ class DoubaoMurmurApp(Gtk.Application):
             on_help_clicked=self._show_help,
             on_keyboard_clicked=self._toggle_keyboard,
             on_overlay_reset_clicked=self._reset_overlay_position,
+            recording_mode=self.recording_mode,
+            on_recording_mode_changed=self._set_recording_mode,
         )
         self.tray_icon.start()
 
@@ -132,6 +144,15 @@ class DoubaoMurmurApp(Gtk.Application):
     def _reset_overlay_position(self) -> None:
         if self.overlay:
             self.overlay.reset_position()
+
+    def _set_recording_mode(self, mode: str) -> None:
+        self.recording_mode = mode
+        if self.hotkey_manager:
+            self.hotkey_manager.set_recording_mode(mode)
+        try:
+            save_recording_mode(mode)
+        except OSError as e:
+            logger.error("Could not save recording mode: %s", e)
 
     def _toggle_keyboard(self) -> None:
         if not self.keyboard:
@@ -271,6 +292,12 @@ class DoubaoMurmurApp(Gtk.Application):
             self.login_window.logout()
 
     def _show_help(self) -> None:
+        if self.recording_mode == RECORDING_MODE_HOLD:
+            recording_help = "按住右 Alt 开始录音，松开后结束"
+            hotkey_help = "  右 Alt 键：按住说话，松开结束"
+        else:
+            recording_help = "按一次右 Alt 开始，再按一次结束"
+            hotkey_help = "  右 Alt 键：切换录音"
         dialog = Gtk.MessageDialog(
             transient_for=None,
             modal=True,
@@ -280,13 +307,12 @@ class DoubaoMurmurApp(Gtk.Application):
         )
         dialog.set_property(
             "secondary-text",
-            "1. 点击 🎤 按钮开始录音\n"
+            f"1. 将光标放到输入框，{recording_help}\n"
             "2. 说话时文字会实时显示\n"
-            "3. 再次点击 🎤 按钮停止录音\n"
-            "4. 识别结果会自动粘贴到当前输入框\n\n"
+            "3. 结束后文字会自动粘贴到输入框\n\n"
             "按 ESC 键可取消当前录音\n\n"
             "快捷键：\n"
-            "  右 Alt 键：切换录音\n"
+            f"{hotkey_help}\n"
             "  ESC 键：取消录音\n"
             "  Ctrl + Super + Shift：显示 / 隐藏软键盘",
         )

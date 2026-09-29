@@ -21,7 +21,12 @@ import time
 
 from gi.repository import GLib
 
-from doubao_murmur.config import DEBOUNCE_INTERVAL
+from doubao_murmur.config import (
+    DEBOUNCE_INTERVAL,
+    RECORDING_MODES,
+    RECORDING_MODE_HOLD,
+    RECORDING_MODE_TOGGLE,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -29,8 +34,12 @@ logger = logging.getLogger(__name__)
 class HotkeyManager:
     """Coordinates input methods for triggering recording."""
 
-    def __init__(self) -> None:
+    def __init__(self, recording_mode: str = RECORDING_MODE_TOGGLE) -> None:
+        if recording_mode not in RECORDING_MODES:
+            raise ValueError(f"Unknown recording mode: {recording_mode}")
         self.on_toggle = None  # () -> None
+        self.on_start = None  # () -> None
+        self.on_stop = None  # () -> None
         self.on_cancel = None  # () -> None
         self.on_keyboard = None  # () -> None (toggle on-screen keyboard)
         self._overlay_button = None
@@ -39,6 +48,9 @@ class HotkeyManager:
         self._cancel_enabled = False
         self._last_toggle_time = 0.0
         self._last_keyboard_time = 0.0
+        self._recording_mode = recording_mode
+        self._hold_active = False
+        self._last_hold_release_time = 0.0
 
     def start(
         self, overlay_button=None, evdev_listener=None, x11_listener=None
@@ -89,8 +101,42 @@ class HotkeyManager:
         self._last_toggle_time = now
         GLib.idle_add(self._dispatch_toggle)
 
+    def trigger_record_press(self) -> None:
+        """Handle the first press of the recording hotkey."""
+        if self._recording_mode != RECORDING_MODE_HOLD:
+            return
+        now = time.monotonic()
+        if self._hold_active:
+            return
+        # X11 and evdev can report the same physical key. A second backend may
+        # deliver its press just after the first backend delivered the release.
+        if now - self._last_hold_release_time < DEBOUNCE_INTERVAL:
+            return
+        self._hold_active = True
+        GLib.idle_add(self._dispatch_start)
+
+    def trigger_record_release(self, valid: bool) -> None:
+        """Handle release; ``valid`` is false when AltGr formed a chord."""
+        if self._recording_mode == RECORDING_MODE_TOGGLE:
+            if valid:
+                self.trigger_toggle()
+            return
+        if not self._hold_active:
+            return
+        self._hold_active = False
+        self._last_hold_release_time = time.monotonic()
+        if valid:
+            GLib.idle_add(self._dispatch_stop)
+        else:
+            GLib.idle_add(self._dispatch_cancel)
+
     def trigger_cancel(self) -> None:
         """Called by input backends for cancel (ESC)."""
+        if self._hold_active:
+            self._hold_active = False
+            self._last_hold_release_time = time.monotonic()
+            GLib.idle_add(self._dispatch_cancel)
+            return
         if self._cancel_enabled:
             GLib.idle_add(self._dispatch_cancel)
 
@@ -115,10 +161,30 @@ class HotkeyManager:
             self.on_toggle()
         return GLib.SOURCE_REMOVE
 
+    def _dispatch_start(self) -> bool:
+        if self.on_start:
+            self.on_start()
+        return GLib.SOURCE_REMOVE
+
+    def _dispatch_stop(self) -> bool:
+        if self.on_stop:
+            self.on_stop()
+        return GLib.SOURCE_REMOVE
+
     def _dispatch_cancel(self) -> bool:
-        if self._cancel_enabled and self.on_cancel:
+        if self.on_cancel:
             self.on_cancel()
         return GLib.SOURCE_REMOVE
 
     def set_cancel_enabled(self, enabled: bool) -> None:
         self._cancel_enabled = enabled
+
+    def set_recording_mode(self, mode: str) -> None:
+        """Apply a mode change immediately, cancelling an active hold."""
+        if mode not in RECORDING_MODES:
+            raise ValueError(f"Unknown recording mode: {mode}")
+        if self._hold_active:
+            self._hold_active = False
+            self._last_hold_release_time = time.monotonic()
+            GLib.idle_add(self._dispatch_cancel)
+        self._recording_mode = mode

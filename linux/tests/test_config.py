@@ -11,9 +11,14 @@ from doubao_murmur.config import (
     AUDIO_SAMPLE_RATE,
     AUTH_ERROR_CODE,
     AUTH_ERROR_KEYWORDS,
+    RECORDING_MODE_HOLD,
+    RECORDING_MODE_TOGGLE,
     WSS_BASE_URL,
     get_config_dir,
     get_params_path,
+    get_settings_path,
+    load_recording_mode,
+    save_recording_mode,
 )
 
 
@@ -45,3 +50,19 @@ def test_get_params_path(tmp_path, monkeypatch):
     monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path))
     path = get_params_path()
     assert path == tmp_path / "doubao-murmur" / "asr_params.json"
+
+
+def test_recording_mode_defaults_and_persists(tmp_path, monkeypatch):
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path))
+
+    assert load_recording_mode() == RECORDING_MODE_TOGGLE
+
+    save_recording_mode(RECORDING_MODE_HOLD)
+    assert load_recording_mode() == RECORDING_MODE_HOLD
+
+
+def test_invalid_recording_mode_falls_back_to_toggle(tmp_path, monkeypatch):
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path))
+    get_settings_path().write_text('{"recording_mode": "unknown"}')
+
+    assert load_recording_mode() == RECORDING_MODE_TOGGLE
