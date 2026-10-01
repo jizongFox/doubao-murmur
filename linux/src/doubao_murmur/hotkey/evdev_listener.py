@@ -87,23 +87,37 @@ class EvdevListener:
         fds: dict[int, str] = {}
         for path in devices:
             try:
-                fd = os.open(path, os.O_RDONLY)
+                fd = os.open(path, os.O_RDONLY | os.O_NONBLOCK)
                 fds[fd] = path
             except Exception as e:
                 logger.warning("Cannot open %s: %s", path, e)
 
         if not fds:
+            self._running = False
             return
 
         buf_size = EVENT_SIZE * 16
 
         try:
-            while self._running:
+            while self._running and fds:
                 readable, _, _ = select.select(list(fds.keys()), [], [], 0.5)
                 for fd in readable:
                     try:
                         data = os.read(fd, buf_size)
-                    except OSError:
+                    except (BlockingIOError, InterruptedError):
+                        continue
+                    except OSError as e:
+                        logger.warning("Cannot read %s: %s", fds[fd], e)
+                        data = b""
+                    if not data:
+                        # A disconnected device remains ready in select();
+                        # retaining it would turn this into a busy loop.
+                        path = fds.pop(fd)
+                        try:
+                            os.close(fd)
+                        except OSError:
+                            pass
+                        logger.info("Stopped listening to input device %s", path)
                         continue
                     for i in range(0, len(data), EVENT_SIZE):
                         if i + EVENT_SIZE > len(data):
@@ -120,6 +134,7 @@ class EvdevListener:
 
                         self._handle_key(ev_code, ev_value)
         finally:
+            self._running = False
             for fd in fds:
                 try:
                     os.close(fd)
