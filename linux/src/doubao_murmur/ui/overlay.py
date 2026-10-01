@@ -29,6 +29,7 @@ from doubao_murmur.ui.windowing import (
     OverlayRole,
     apply_overlay_window_hints,
     layer_shell_get_margins,
+    layer_shell_reset_status_position,
     layer_shell_set_margins,
     present_overlay,
     using_layer_shell,
@@ -206,6 +207,22 @@ class Overlay:
         if not self._anim_timer:
             self._anim_timer = GLib.timeout_add(33, self._tick_indicator)
 
+    def reset_position(self) -> None:
+        """Forget the saved position and restore the default placement."""
+        self._saved_x = None
+        self._saved_y = None
+        try:
+            get_overlay_config_path().unlink(missing_ok=True)
+        except OSError as e:
+            logger.warning("Could not clear overlay position: %s", e)
+
+        if not self._window:
+            return
+        if using_layer_shell():
+            layer_shell_reset_status_position(self._window)
+        elif self._window.get_visible():
+            present_overlay(self._window, OverlayRole.STATUS)
+
     def _tick_indicator(self) -> bool:
         if self._indicator:
             self._indicator.queue_draw()
@@ -245,7 +262,7 @@ class Overlay:
     def _status_text(self) -> str:
         state = self.app_state.recording_state
         return {
-            RecordingState.STARTING: "正在启动语音识别...",
+            RecordingState.STARTING: "正在聆听，可直接说话...",
             RecordingState.RECORDING: "正在聆听...",
             RecordingState.STOPPING: "正在处理...",
         }.get(state, "")

@@ -1,4 +1,4 @@
-.PHONY: install run test clean flatpak-build flatpak-install
+.PHONY: install run test clean deb flatpak-build flatpak-install
 
 # Install Python dependencies
 install:
@@ -11,6 +11,10 @@ run:
 # Run tests
 test:
 	PYTHONPATH=src python3 -m pytest tests/ -v
+
+# Build a native Debian/Ubuntu package
+deb:
+	sh ./debian/build.sh
 
 # Build Flatpak (uses the org.flatpak.Builder flatpak; install with:
 #   flatpak install flathub org.flatpak.Builder)

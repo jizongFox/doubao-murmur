@@ -1,0 +1,5 @@
+#!/bin/sh
+
+export GDK_BACKEND="${GDK_BACKEND:-x11}"
+export PYTHONPATH="/usr/lib/doubao-murmur${PYTHONPATH:+:$PYTHONPATH}"
+exec /usr/bin/python3 -m doubao_murmur "$@"
