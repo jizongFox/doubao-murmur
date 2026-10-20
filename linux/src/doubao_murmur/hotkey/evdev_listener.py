@@ -2,7 +2,7 @@
 
 OPTIONAL input method. Requires user to be in the 'input' group.
 Listens for:
-- Right Alt (KEY_RIGHTALT=100) press-and-release -> toggle
+- Right Alt (KEY_RIGHTALT=100) press and release
 - ESC (KEY_ESC=1) -> cancel
 """
 
@@ -30,8 +30,9 @@ EVENT_FORMAT = "llHHi"
 class EvdevListener:
     """Reads /dev/input/event* devices for global hotkeys."""
 
-    def __init__(self, on_toggle, on_escape) -> None:
-        self.on_toggle = on_toggle
+    def __init__(self, on_record_press, on_record_release, on_escape) -> None:
+        self.on_record_press = on_record_press
+        self.on_record_release = on_record_release
         self.on_escape = on_escape
         self._thread: threading.Thread | None = None
         self._running = False
@@ -86,23 +87,37 @@ class EvdevListener:
         fds: dict[int, str] = {}
         for path in devices:
             try:
-                fd = os.open(path, os.O_RDONLY)
+                fd = os.open(path, os.O_RDONLY | os.O_NONBLOCK)
                 fds[fd] = path
             except Exception as e:
                 logger.warning("Cannot open %s: %s", path, e)
 
         if not fds:
+            self._running = False
             return
 
         buf_size = EVENT_SIZE * 16
 
         try:
-            while self._running:
+            while self._running and fds:
                 readable, _, _ = select.select(list(fds.keys()), [], [], 0.5)
                 for fd in readable:
                     try:
                         data = os.read(fd, buf_size)
-                    except OSError:
+                    except (BlockingIOError, InterruptedError):
+                        continue
+                    except OSError as e:
+                        logger.warning("Cannot read %s: %s", fds[fd], e)
+                        data = b""
+                    if not data:
+                        # A disconnected device remains ready in select();
+                        # retaining it would turn this into a busy loop.
+                        path = fds.pop(fd)
+                        try:
+                            os.close(fd)
+                        except OSError:
+                            pass
+                        logger.info("Stopped listening to input device %s", path)
                         continue
                     for i in range(0, len(data), EVENT_SIZE):
                         if i + EVENT_SIZE > len(data):
@@ -117,25 +132,26 @@ class EvdevListener:
                         if ev_type != EV_KEY:
                             continue
 
-                        if ev_code == KEY_RIGHTALT:
-                            if ev_value == 1:  # press
-                                self._right_alt_down = True
-                                self._other_key_pressed = False
-                            elif ev_value == 0:  # release
-                                if (
-                                    self._right_alt_down
-                                    and not self._other_key_pressed
-                                ):
-                                    self.on_toggle()
-                                self._right_alt_down = False
-                        elif ev_code != KEY_RIGHTALT and ev_value == 1:
-                            if self._right_alt_down:
-                                self._other_key_pressed = True
-                            if ev_code == KEY_ESC:
-                                self.on_escape()
+                        self._handle_key(ev_code, ev_value)
         finally:
+            self._running = False
             for fd in fds:
                 try:
                     os.close(fd)
                 except OSError:
                     pass
+
+    def _handle_key(self, keycode: int, value: int) -> None:
+        if keycode == KEY_RIGHTALT:
+            if value == 1 and not self._right_alt_down:  # press
+                self._right_alt_down = True
+                self._other_key_pressed = False
+                self.on_record_press()
+            elif value == 0 and self._right_alt_down:  # release
+                self.on_record_release(not self._other_key_pressed)
+                self._right_alt_down = False
+        elif value == 1:
+            if self._right_alt_down:
+                self._other_key_pressed = True
+            if keycode == KEY_ESC:
+                self.on_escape()

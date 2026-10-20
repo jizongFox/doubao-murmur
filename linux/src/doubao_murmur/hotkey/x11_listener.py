@@ -7,7 +7,7 @@ which never appears in /dev/input, so the evdev listener cannot see it.
 Passive: does not grab keys or interfere with other clients.
 
 Semantics mirror EvdevListener:
-- Right Alt press-and-release with no other key in between -> toggle
+- Right Alt press and release are reported separately
 - ESC press -> cancel
 """
 
@@ -27,8 +27,11 @@ XK_ISO_LEVEL3_SHIFT = 0xFE03
 class X11KeyListener:
     """Global X11 key listener using the XRecord extension."""
 
-    def __init__(self, on_toggle, on_escape, on_keyboard=None) -> None:
-        self.on_toggle = on_toggle
+    def __init__(
+        self, on_record_press, on_record_release, on_escape, on_keyboard=None
+    ) -> None:
+        self.on_record_press = on_record_press
+        self.on_record_release = on_record_release
         self.on_escape = on_escape
         self.on_keyboard = on_keyboard
         self._thread: threading.Thread | None = None
@@ -246,11 +249,12 @@ class X11KeyListener:
 
         if keycode in self._kc_toggle:
             if pressed:
-                self._right_alt_down = True
-                self._other_key_pressed = False
-            else:
-                if self._right_alt_down and not self._other_key_pressed:
-                    self.on_toggle()
+                if not self._right_alt_down:
+                    self._right_alt_down = True
+                    self._other_key_pressed = False
+                    self.on_record_press()
+            elif self._right_alt_down:
+                self.on_record_release(not self._other_key_pressed)
                 self._right_alt_down = False
         elif pressed:
             if self._right_alt_down:

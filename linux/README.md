@@ -6,7 +6,7 @@
 
 ## ✨ 功能
 
-- ⌨️ **全局热键**: 右 `Alt` 开始/停止录音，`ESC` 取消（X11 桌面下任何应用均可用；Wayland 见 [下文](#-wayland--gnome-用户须知)）
+- ⌨️ **全局热键**: 右 `Alt` 可选“按键切换”或“按住说话”，`ESC` 取消（X11 桌面下任何应用均可用；Wayland 见 [下文](#-wayland--gnome-用户须知)）
 - 🎮 **手柄一键语音输入**: 在 Steam Input 桌面布局中把手柄按键映射为右 Alt 即可（见下文）
 - 📝 **实时转写**: 说话时文字实时显示在屏幕顶部悬浮条中（不抢焦点、不挡输入）
 - 📋 **自动粘贴**: 识别结果自动粘贴到当前输入框；终端自动改用 `Ctrl+Shift+V`
@@ -46,6 +46,24 @@ SteamOS 桌面模式自带的虚拟键盘不能移动、不能缩放，常挡住
 - **显示协议**: **X11 会话开箱即用**；Wayland 会话需要额外配置且功能受限，见 [下文](#-wayland--gnome-用户须知)
 
 ## 🚀 安装
+
+### Ubuntu 26.04: `.deb`
+
+从源码构建并安装原生包：
+
+```bash
+cd linux
+make deb
+sudo apt install ./dist/doubao-murmur_*_all.deb
+```
+
+安装不会删除 `~/.config/doubao-murmur/` 中已有的登录信息。Wayland 下首次安装后，
+再完成一次输入权限和自动粘贴设置，然后注销并重新登录：
+
+```bash
+sudo usermod -aG input "$USER"
+systemctl --user enable --now ydotool.service
+```
 
 ### 方法一: Flatpak (推荐)
 
@@ -92,19 +110,23 @@ PYTHONPATH=src .venv/bin/python -m doubao_murmur
 
 1. 首次启动会弹出控制面板，点击 **登录豆包**，在 WebView 中完成登录
 2. 登录后应用驻留在系统托盘（右下角 🎤 图标）
-3. 将光标放到任意输入框，按 **右 Alt**，屏幕顶部出现悬浮条，开始说话
-4. 悬浮条实时显示识别文字（超长时自动滚动显示最新内容）
-5. 再按一次 **右 Alt** 结束，文字自动粘贴到输入框
-6. 想中途放弃按 `ESC`，不复制也不粘贴
+3. 在控制面板选择录音方式；默认是 **按键切换**，也可选 **按住说话**
+4. 将光标放到任意输入框，按 **右 Alt**，屏幕顶部出现悬浮条，开始说话
+5. 悬浮条实时显示识别文字（超长时自动滚动显示最新内容）
+6. 按键切换模式下再按一次 **右 Alt**；按住说话模式下松开 **右 Alt**。文字会自动粘贴到输入框
+7. 想中途放弃按 `ESC`，不复制也不粘贴
 
 > 悬浮条本身只显示文字，没有按钮 —— 早期版本那个屏幕底部的 ⏹ 一键录音按钮
 > 已在 v1.4.6 移除。开始和结束都只能用热键。
+
+悬浮条可以拖动并记住位置。若更换显示器后位置不合适，可从托盘菜单或
+控制面板选择 **重置悬浮框位置**。
 
 ### 快捷键
 
 | 快捷键 | 功能 |
 |--------|------|
-| 右 Alt 键 | 开始 / 停止录音 |
+| 右 Alt 键 | 按键切换，或按住说话（可在控制面板选择） |
 | ESC 键 | 取消当前录音（不粘贴） |
 
 ### 🎮 手柄一键语音输入 (Steam Deck / 掌机)
@@ -147,11 +169,15 @@ flatpak override --user --device=input com.doubao.Murmur
 **自动粘贴仍然不行**
 
 粘贴依赖 `xdotool`（X11 专用）或 `ydotool`（需要 `ydotoold` 常驻）。
-Wayland 下 xdotool 粘不进原生窗口；装了 ydotool 并启动 `ydotoold` 才能自动粘贴：
+Wayland 下 xdotool 粘不进原生窗口。Ubuntu 26.04 安装的是用户级
+`ydotool.service`，可这样启用：
 
 ```bash
-sudo systemctl enable --now ydotoold
+sudo apt install ydotool
+systemctl --user enable --now ydotool.service
 ```
+
+其他发行版的服务名称和运行方式可能不同，请以发行版的软件包说明为准。
 
 **没装 ydotool 也能用** —— 文字始终会复制到剪贴板，手动 `Ctrl+V` 即可
 （终端里是 `Ctrl+Shift+V`）。
@@ -203,7 +229,8 @@ linux/
 
 ## 🔧 配置
 
-配置文件存储在 `~/.config/doubao-murmur/asr_params.json`。
+登录凭证存储在 `~/.config/doubao-murmur/asr_params.json`，录音方式存储在
+`~/.config/doubao-murmur/settings.json`。
 
 删除此文件可以强制重新登录：
 
@@ -217,7 +244,7 @@ rm ~/.config/doubao-murmur/asr_params.json
 - 已登录时应用驻留系统托盘，查看右下角是否有 🎤 图标，按右 Alt 即可录音
 - 点击托盘图标或再启动一次应用（单实例）可打开控制面板
 - 桌面不支持托盘（如原版 GNOME）时没有图标，功能不受影响
-- 界面上**没有**麦克风按钮，开始录音只能按右 Alt
+- 界面上**没有**麦克风按钮，使用右 Alt 开始录音
 
 ### 按右 Alt 没反应
 - Wayland 会话（GNOME 默认）需要额外配置，见 [Wayland / GNOME 用户须知](#-wayland--gnome-用户须知)
