@@ -188,9 +188,12 @@ async fn run_request<F: Fn(AsrEvent)>(
 
             chunk = audio_rx.recv(), if sending => match chunk {
                 Some(chunk) => {
-                    if let Err(e) = write.send(Message::Binary(chunk)).await {
+                    if let Err(e) = send_audio(&mut write, chunk).await {
                         log_warn!("Audio send failed: {e}");
-                        break;
+                        emit(AsrEvent::Error(e));
+                        // A timed-out send may have partially written a frame.
+                        // Drop the socket; do not retry it or await another write.
+                        return;
                     }
                 }
                 None => {
@@ -199,9 +202,9 @@ async fn run_request<F: Fn(AsrEvent)>(
                     // read. A stop command on a separate channel can overtake both.
                     let silence = vec![0u8; config::audio_chunk_samples() * 2];
                     for _ in 0..config::stop_trailing_silence_chunks() {
-                        if let Err(e) = write.send(Message::Binary(silence.clone())).await {
+                        if let Err(e) = send_audio(&mut write, silence.clone()).await {
                             log_warn!("Silence padding send failed: {e}");
-                            emit(AsrEvent::Error(e.to_string()));
+                            emit(AsrEvent::Error(e));
                             return;
                         }
                     }
@@ -248,8 +251,25 @@ async fn run_request<F: Fn(AsrEvent)>(
         emit(AsrEvent::Error("连接已关闭".to_string()));
     }
 
-    let _ = write.close().await;
+    let _ = tokio::time::timeout(config::AUDIO_SEND_TIMEOUT, write.close()).await;
     log_info!("Disconnected");
+}
+
+/// The deadline covers both readiness and flush, not just queueing a frame.
+/// Speech and silence use the same bound; neither may strand the drain phase.
+async fn send_audio<S>(write: &mut S, chunk: Vec<u8>) -> Result<(), String>
+where
+    S: futures_util::Sink<Message, Error = Error> + Unpin,
+{
+    match tokio::time::timeout(
+        config::AUDIO_SEND_TIMEOUT,
+        write.send(Message::Binary(chunk)),
+    )
+    .await
+    {
+        Ok(result) => result.map_err(|e| e.to_string()),
+        Err(_) => Err("音频发送超时".to_string()),
+    }
 }
 
 fn make_request(
@@ -364,6 +384,81 @@ fn server_close_event(received_any: bool, code: Option<CloseCode>) -> AsrEvent {
 mod tests {
     use super::*;
     use std::collections::HashMap;
+    use std::pin::Pin;
+    use std::task::{Context, Poll};
+
+    // Model backpressure at either poll_ready or poll_flush. Real TCP buffers
+    // can absorb small test frames even when the peer never reads them.
+    struct StalledWriter {
+        ready: bool,
+    }
+
+    impl futures_util::Sink<Message> for StalledWriter {
+        type Error = Error;
+
+        fn poll_ready(self: Pin<&mut Self>, _: &mut Context<'_>) -> Poll<Result<(), Error>> {
+            if self.ready {
+                Poll::Ready(Ok(()))
+            } else {
+                Poll::Pending
+            }
+        }
+
+        fn start_send(self: Pin<&mut Self>, _: Message) -> Result<(), Error> {
+            Ok(())
+        }
+
+        fn poll_flush(self: Pin<&mut Self>, _: &mut Context<'_>) -> Poll<Result<(), Error>> {
+            Poll::Pending
+        }
+
+        fn poll_close(self: Pin<&mut Self>, _: &mut Context<'_>) -> Poll<Result<(), Error>> {
+            Poll::Pending
+        }
+    }
+
+    #[tokio::test]
+    async fn speech_and_silence_sends_are_bounded_at_readiness_and_flush() {
+        let cases = [false, true].into_iter().flat_map(|ready| {
+            [0, 1].into_iter().map(move |sample| async move {
+                let mut writer = StalledWriter { ready };
+                let chunk = vec![sample; config::audio_chunk_samples() * 2];
+                let result = tokio::time::timeout(
+                    config::AUDIO_SEND_TIMEOUT + std::time::Duration::from_secs(1),
+                    send_audio(&mut writer, chunk),
+                )
+                .await
+                .expect("a stalled audio write must return before the outer watchdog");
+                assert_eq!(result, Err("音频发送超时".to_string()));
+            })
+        });
+        futures_util::future::join_all(cases).await;
+    }
+
+    #[tokio::test]
+    async fn bounded_audio_send_preserves_frames_and_reports_socket_errors() {
+        let messages = std::sync::Mutex::new(Vec::new());
+        let mut writer = Box::pin(futures_util::sink::unfold(
+            &messages,
+            |messages, frame| async move {
+                messages.lock().unwrap().push(frame);
+                Ok::<_, Error>(messages)
+            },
+        ));
+        assert_eq!(send_audio(&mut writer, vec![1, 2]).await, Ok(()));
+        assert_eq!(*messages.lock().unwrap(), vec![Message::Binary(vec![1, 2])]);
+
+        let mut writer = Box::pin(futures_util::sink::unfold((), |(), _: Message| async {
+            Err::<(), _>(Error::Io(std::io::Error::new(
+                std::io::ErrorKind::ConnectionReset,
+                "peer stopped reading",
+            )))
+        }));
+        assert!(send_audio(&mut writer, vec![1, 2])
+            .await
+            .unwrap_err()
+            .contains("peer stopped reading"));
+    }
 
     fn sample_params() -> AsrParams {
         let mut params = AsrParams::default();
