@@ -45,6 +45,7 @@ class ASRClient:
         self._connected = False
         self._pending_audio: list[bytes] = []
         self._lock = threading.Lock()
+        self._callback_lock = threading.RLock()
         self._loop: asyncio.AbstractEventLoop | None = None
         self._thread: threading.Thread | None = None
         self._task: asyncio.Task | None = None
@@ -148,8 +149,13 @@ class ASRClient:
                 # Flush buffered audio
                 self._flush_audio_buffer()
 
-                if self.on_open:
-                    self.on_open()
+                # disconnect() can race with the post-handshake setup above.
+                # Do not announce a connection that was cancelled meanwhile.
+                with self._callback_lock:
+                    if self._disconnect_requested.is_set():
+                        return
+                    if self.on_open:
+                        self.on_open()
 
                 # Receive loop
                 received_any = False
@@ -260,17 +266,18 @@ class ASRClient:
 
     def disconnect(self) -> None:
         """Cancel the connection, even if its handshake hasn't finished yet."""
-        with self._lock:
-            if self._disconnect_requested.is_set():
-                return
-            self._disconnect_requested.set()
-            self._connected = False
-            self._pending_audio.clear()
-            # Clear first so the receive loop can distinguish our close.
-            self._ws = None
-            if self._loop and not self._loop.is_closed():
-                # Queue cancellation even if the worker hasn't started its loop.
-                self._loop.call_soon_threadsafe(self._cancel_connection)
+        with self._callback_lock:
+            with self._lock:
+                if self._disconnect_requested.is_set():
+                    return
+                self._disconnect_requested.set()
+                self._connected = False
+                self._pending_audio.clear()
+                # Clear first so the receive loop can distinguish our close.
+                self._ws = None
+                if self._loop and not self._loop.is_closed():
+                    # Queue cancellation even if the worker hasn't started its loop.
+                    self._loop.call_soon_threadsafe(self._cancel_connection)
         logger.info("Disconnected")
 
     def _flush_audio_buffer(self) -> None:

@@ -493,6 +493,28 @@ class TestConnectionLifetime:
         assert client._pending_audio == []
         assert client._thread is None
 
+    def test_disconnect_during_setup_does_not_emit_open(
+        self, client, sample_params, monkeypatch
+    ):
+        ws = SimpleNamespace(close=AsyncMock())
+        opened = Mock()
+        client.on_open = opened
+
+        async def connect(*args, **kwargs):
+            return ws
+
+        monkeypatch.setattr(
+            asr_client_module, "_load_websockets",
+            lambda: SimpleNamespace(connect=connect),
+        )
+        monkeypatch.setattr(client, "_flush_audio_buffer", client.disconnect)
+
+        client.connect(sample_params)
+        client._thread.join(5)
+
+        assert not client._thread.is_alive()
+        opened.assert_not_called()
+
     def test_connection_failure_closes_loop(self, client, sample_params, monkeypatch):
         error = OSError("network unavailable")
         connect = AsyncMock(side_effect=error)
