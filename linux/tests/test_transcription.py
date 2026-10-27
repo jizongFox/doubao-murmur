@@ -59,6 +59,7 @@ def recording(monkeypatch):
     state = AppState()
     state.login_status = LoginStatus.LOGGED_IN
     manager = module.TranscriptionManager(state)
+    manager.on_save_params = module.ParamsStore.save
     manager.on_paste = Mock()
     manager.on_overlay_hide = Mock()
     manager.on_auth_expired = Mock()

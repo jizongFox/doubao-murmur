@@ -10,7 +10,7 @@ import logging
 import gi
 
 gi.require_version("Gtk", "4.0")
-from gi.repository import Gio, GLib, Gtk
+from gi.repository import Gio, Gtk
 
 from doubao_murmur.app_state import AppState, LoginStatus
 from doubao_murmur.config import (
@@ -83,6 +83,7 @@ class DoubaoMurmurApp(Gtk.Application):
         self.transcription_manager.on_overlay_hide = self._hide_overlay
         self.transcription_manager.on_overlay_update = self._update_overlay
         self.transcription_manager.on_params_needed = self._extract_params
+        self.transcription_manager.on_save_params = self._save_params
         self.transcription_manager.on_cancel_enabled_changed = (
             self._on_cancel_enabled_changed
         )
@@ -194,45 +195,54 @@ class DoubaoMurmurApp(Gtk.Application):
             return
 
         if not self.login_window:
-            self.login_window = LoginWindow(self.app_state)
-            self.login_window._on_login_status_change = (
-                self._on_login_detected
-            )
-            self.login_window.load()
+            self._create_login_window()
         self.login_window.show()
 
-    def _on_login_detected(self, status: str, nickname: str | None) -> None:
-        if status == "loggedIn":
-            self.app_state.login_status = LoginStatus.LOGGED_IN
-            logger.info("Logged in as: %s", nickname)
-            self._extract_save_and_destroy_webview()
-        else:
-            self.app_state.login_status = LoginStatus.NOT_LOGGED_IN
-
-    def _extract_save_and_destroy_webview(self) -> None:
-        """Extract params, save, destroy WebView."""
-
-        def on_params(params):
-            if params:
-                ParamsStore.save(params)
-            if self.login_window:
-                self.login_window.hide()
-                self.login_window.destroy()
-                self.login_window = None
-
-        # Delay 1s for cookies to settle
-        GLib.timeout_add(
-            1000,
-            lambda: (
-                self.login_window.extract_params_async(on_params)
-                if self.login_window
-                else None,
-                GLib.SOURCE_REMOVE,
-            )[1],
+    def _create_login_window(self) -> None:
+        self.login_window = LoginWindow(
+            on_params_ready=self._accept_login,
+            on_login_failed=self._on_login_failed,
+            on_login_required=self._on_login_required,
+            on_destroy=self._on_login_window_destroyed,
         )
 
+    def _accept_login(self, params, nickname: str | None) -> bool:
+        if not self._save_params(params):
+            self._on_login_failed("无法保存登录凭证，请重试")
+            return False
+        self.app_state.error_message = None
+        self.app_state.login_status = LoginStatus.LOGGED_IN
+        logger.info("Logged in as: %s", nickname)
+        return True
+
+    @staticmethod
+    def _save_params(params) -> bool:
+        try:
+            return ParamsStore.save(params)
+        except Exception as e:
+            logger.error("Could not save login credentials: %s", e)
+            return False
+
+    def _on_login_failed(self, message="无法获取登录参数，请重试") -> None:
+        self.app_state.login_status = LoginStatus.NOT_LOGGED_IN
+        self.app_state.error_message = message
+        dialog = Gtk.MessageDialog(
+            transient_for=None, modal=True,
+            message_type=Gtk.MessageType.ERROR,
+            buttons=Gtk.ButtonsType.OK, text=message,
+        )
+        dialog.connect("response", lambda d, _: d.destroy())
+        dialog.present()
+
+    def _on_login_required(self) -> None:
+        self.app_state.login_status = LoginStatus.NOT_LOGGED_IN
+
+    def _on_login_window_destroyed(self, window) -> None:
+        if self.login_window is window:
+            self.login_window = None
+
     def _extract_params(self, callback) -> None:
-        """Called by TranscriptionManager when params are needed."""
+        """Retrieve params; the recording owner decides whether to save them."""
         if self.login_window and self.login_window.is_active:
             self.login_window.extract_params_async(callback)
         else:
@@ -281,14 +291,10 @@ class DoubaoMurmurApp(Gtk.Application):
     def _do_logout(self) -> None:
         ParamsStore.clear()
         self.app_state.login_status = LoginStatus.NOT_LOGGED_IN
+        self.app_state.error_message = None
+        if not self.login_window and LoginWindow.is_available():
+            self._create_login_window()
         if self.login_window:
-            self.login_window.logout()
-        elif LoginWindow.is_available():
-            self.login_window = LoginWindow(self.app_state)
-            self.login_window._on_login_status_change = (
-                self._on_login_detected
-            )
-            self.login_window.load()
             self.login_window.logout()
 
     def _show_help(self) -> None:
@@ -321,6 +327,8 @@ class DoubaoMurmurApp(Gtk.Application):
 
     def _quit(self) -> None:
         """Clean shutdown."""
+        if self.login_window:
+            self.login_window.destroy()
         if self.transcription_manager:
             self.transcription_manager.handle_cancel()
         if self.hotkey_manager:
