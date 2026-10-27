@@ -1,0 +1,87 @@
+name: Ubuntu 26.04 Debian package
+
+on:
+  push:
+    branches: [master]
+    tags: ['deb-v*']
+    paths: ['linux/**', '.github/workflows/ubuntu-deb.yml', 'LICENSE']
+  pull_request:
+    paths: ['linux/**', '.github/workflows/ubuntu-deb.yml', 'LICENSE']
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: ubuntu-24.04
+    # Check apt dependencies against the target OS, not the runner's release.
+    container: ubuntu:26.04
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install build and test tools
+        env:
+          DEBIAN_FRONTEND: noninteractive
+        run: |
+          apt-get update
+          apt-get install -y --no-install-recommends dpkg-dev python3-pytest \
+            python3-pytest-asyncio xvfb xauth xdotool xclip x11-utils
+      - name: Build package
+        shell: bash
+        run: |
+          if [[ "$GITHUB_REF" == refs/tags/deb-v* ]]; then
+            export DEB_VERSION="${GITHUB_REF_NAME#deb-v}"
+          fi
+          sh linux/debian/build.sh
+          cd linux/dist
+          sha256sum ./*.deb > SHA256SUMS
+          dpkg-deb --info ./*.deb
+      - name: Install package and resolve target OS dependencies
+        env:
+          DEBIAN_FRONTEND: noninteractive
+        run: apt-get install -y ./linux/dist/*.deb
+      - name: Test installed package
+        env:
+          PYTHONPATH: /usr/lib/doubao-murmur
+        run: |
+          # Importing sounddevice initializes PortAudio, which requires an
+          # audio server on Ubuntu 26.04. Check its presence without opening it.
+          python3 -c 'from importlib.util import find_spec; from doubao_murmur.app import DoubaoMurmurApp; import websockets, Xlib; assert find_spec("sounddevice") is not None'
+          python3 -m pytest linux/tests/ -q
+      - name: Isolated UI startup smoke test
+        # No credentials, audio devices or remote pages. Only this isolated
+        # root container test disables the WebKit sandbox, never the launcher.
+        env:
+          PYTHONPATH: /usr/lib/doubao-murmur
+        run: xvfb-run -a env DOUBAO_X11_SMOKE=1 GDK_BACKEND=x11 XDG_SESSION_TYPE=x11 WEBKIT_DISABLE_SANDBOX_THIS_IS_DANGEROUS=1 python3 -m pytest linux/tests/test_x11_smoke.py -q
+      - name: Upload installable package and checksum
+        uses: actions/upload-artifact@v4
+        with:
+          name: doubao-murmur-ubuntu-26.04-${{ github.sha }}
+          path: |
+            linux/dist/*.deb
+            linux/dist/SHA256SUMS
+          if-no-files-found: error
+          retention-days: 30
+
+  release:
+    if: startsWith(github.ref, 'refs/tags/deb-v')
+    needs: build
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: doubao-murmur-ubuntu-26.04-${{ github.sha }}
+          path: dist
+      - name: Publish Ubuntu package release
+        uses: softprops/action-gh-release@v2
+        with:
+          name: Ubuntu 26.04 package ${{ github.ref_name }}
+          files: |
+            dist/*.deb
+            dist/SHA256SUMS
+          fail_on_unmatched_files: true
+          generate_release_notes: true
+          prerelease: ${{ contains(github.ref_name, '-rc') || contains(github.ref_name, '-beta') || contains(github.ref_name, '-alpha') }}
