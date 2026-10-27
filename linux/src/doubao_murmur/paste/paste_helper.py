@@ -1,21 +1,20 @@
-"""Copy text to clipboard and simulate Ctrl+V paste.
+"""Desktop operations used by TextDelivery.
 
-Mirrors PasteHelper.swift.
+CLI operations block and belong on the delivery worker. Only copy_with_gtk
+touches GTK and must run on its main thread. Successful key injection means
+the helper accepted the request, not that the target application pasted it.
 
-Methods (in priority order):
-1. wl-copy (Wayland clipboard) + uinput (kernel-level paste simulation)
-2. ydotool/wtype (paste simulation)
-3. xclip/xsel (X11 clipboard) + xdotool (X11 paste simulation)
-4. GTK clipboard API as last resort
+Clipboard priority: wl-copy, xclip, xsel, then GTK (via TextDelivery).
+Injection priority: native X11 tries xdotool first, then uinput/ydotool/wtype;
+Wayland tries uinput/ydotool/wtype first, then xdotool for XWayland windows.
 """
 
 from __future__ import annotations
 
 import logging
 import subprocess
-import time
+from threading import Event
 
-from doubao_murmur.config import PASTE_DELAY
 from doubao_murmur.host_tools import command_candidates
 from doubao_murmur.desktop import is_x11_session
 from doubao_murmur.paste.kwin_window import active_window_class as kwin_active_window_class
@@ -54,68 +53,36 @@ _TERMINAL_WM_CLASSES = {
 
 
 class PasteHelper:
-    """Copy text to clipboard and simulate paste keystroke."""
+    """Clipboard and injection backends; ordering is owned by TextDelivery."""
 
     @staticmethod
-    def copy_and_paste(text: str) -> None:
+    def copy_to_clipboard(text: str, stop: Event | None = None) -> bool:
+        """Try CLI clipboard helpers in order; never access GTK here."""
         if not text:
-            return
-        PasteHelper._copy_to_clipboard(text)
-        time.sleep(PASTE_DELAY)
-        PasteHelper._simulate_paste()
+            return False
+        for tool, args in (
+            ("wl-copy", []),
+            ("xclip", ["-selection", "clipboard"]),
+            ("xsel", ["--clipboard", "--input"]),
+        ):
+            for command in command_candidates(tool):
+                if stop is not None and stop.is_set():
+                    return False
+                try:
+                    subprocess.run(
+                        command + args, input=text.encode(), check=True, timeout=3,
+                    )
+                    logger.info("Copied to clipboard via %s", tool)
+                    return True
+                except Exception as e:
+                    logger.warning("%s failed: %s", tool, e)
+        return False
 
     @staticmethod
-    def copy_only(text: str) -> None:
+    def copy_with_gtk(text: str) -> bool:
+        """Last-resort clipboard copy, called only on the GTK main thread."""
         if not text:
-            return
-        PasteHelper._copy_to_clipboard(text)
-
-    @staticmethod
-    def _copy_to_clipboard(text: str) -> None:
-        """Copy text to system clipboard."""
-        # Try Wayland first
-        for command in command_candidates("wl-copy"):
-            try:
-                subprocess.run(
-                    command,
-                    input=text.encode(),
-                    check=True,
-                    timeout=3,
-                )
-                logger.info("Copied to clipboard via wl-copy")
-                return
-            except Exception as e:
-                logger.warning("wl-copy failed: %s", e)
-
-        # Try X11
-        for command in command_candidates("xclip"):
-            try:
-                subprocess.run(
-                    command + ["-selection", "clipboard"],
-                    input=text.encode(),
-                    check=True,
-                    timeout=3,
-                )
-                logger.info("Copied to clipboard via xclip")
-                return
-            except Exception as e:
-                logger.warning("xclip failed: %s", e)
-
-        # Try xsel
-        for command in command_candidates("xsel"):
-            try:
-                subprocess.run(
-                    command + ["--clipboard", "--input"],
-                    input=text.encode(),
-                    check=True,
-                    timeout=3,
-                )
-                logger.info("Copied to clipboard via xsel")
-                return
-            except Exception as e:
-                logger.warning("xsel failed: %s", e)
-
-        # GTK clipboard as last resort
+            return False
         try:
             from gi.repository import Gdk
 
@@ -124,30 +91,38 @@ class PasteHelper:
                 clipboard = display.get_clipboard()
                 clipboard.set(text)
                 logger.info("Copied to clipboard via GTK")
+                return True
         except Exception as e:
             logger.error("All clipboard methods failed: %s", e)
+        return False
 
     @staticmethod
-    def _simulate_paste() -> None:
+    def simulate_paste(stop: Event | None = None) -> bool:
         """Simulate the paste keystroke for the focused window.
 
         Terminals use Ctrl+Shift+V; everything else uses Ctrl+V.
         """
+        if stop is not None and stop.is_set():
+            return False
         use_shift = PasteHelper._focused_window_is_terminal()
+        if stop is not None and stop.is_set():
+            return False
         x11_session = is_x11_session()
 
         # A native X11 desktop needs no uinput permissions or daemon. Do not
         # take this shortcut on Wayland merely because XWayland sets DISPLAY.
-        if x11_session and PasteHelper._paste_with_xdotool(use_shift):
-            return
+        if x11_session and PasteHelper._paste_with_xdotool(use_shift, stop):
+            return True
 
         # Try uinput first: kernel-level injection that works on both
         # Wayland and X11 with no external tools. Gated on /dev/uinput
         # write access (SteamOS grants it; most distros do not by default).
         if UinputPaster.is_available():
+            if stop is not None and stop.is_set():
+                return False
             if UinputPaster.paste(use_shift=use_shift):
                 logger.info("Paste simulated via uinput")
-                return
+                return True
             logger.warning("uinput paste failed, falling back")
 
         # Try ydotool (works on both Wayland and X11)
@@ -157,6 +132,8 @@ class PasteHelper:
         else:
             ydotool_keys = ["29:1", "47:1", "47:0", "29:0"]
         for command in command_candidates("ydotool"):
+            if stop is not None and stop.is_set():
+                return False
             try:
                 subprocess.run(
                     command + ["key"] + ydotool_keys,
@@ -164,7 +141,7 @@ class PasteHelper:
                     timeout=3,
                 )
                 logger.info("Paste simulated via ydotool")
-                return
+                return True
             except Exception as e:
                 logger.warning("ydotool failed: %s", e)
 
@@ -175,6 +152,8 @@ class PasteHelper:
         else:
             wtype_args = ["-M", "ctrl", "-P", "v", "-m", "ctrl"]
         for command in command_candidates("wtype"):
+            if stop is not None and stop.is_set():
+                return False
             try:
                 subprocess.run(
                     command + wtype_args,
@@ -182,25 +161,28 @@ class PasteHelper:
                     timeout=3,
                 )
                 logger.info("Paste simulated via wtype")
-                return
+                return True
             except Exception as e:
                 logger.warning("wtype failed: %s", e)
 
         # Try xdotool (X11 only)
-        if not x11_session and PasteHelper._paste_with_xdotool(use_shift):
-            return
+        if not x11_session and PasteHelper._paste_with_xdotool(use_shift, stop):
+            return True
 
         logger.error("No paste simulation method available")
         logger.info(
             "Text was copied to clipboard but could not auto-paste. "
             "Install xdotool on X11 or configure ydotool on Wayland."
         )
+        return False
 
     @staticmethod
-    def _paste_with_xdotool(use_shift: bool) -> bool:
+    def _paste_with_xdotool(use_shift: bool, stop: Event | None = None) -> bool:
         """Try local/Flatpak host X11 injection, reporting success for fallback."""
         xdotool_key = "ctrl+shift+v" if use_shift else "ctrl+v"
         for command in command_candidates("xdotool"):
+            if stop is not None and stop.is_set():
+                return False
             try:
                 subprocess.run(
                     command + ["key", xdotool_key],

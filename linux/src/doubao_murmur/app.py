@@ -23,7 +23,7 @@ from doubao_murmur.hotkey.manager import HotkeyManager
 from doubao_murmur.hotkey.x11_listener import X11KeyListener
 from doubao_murmur.keyboard.keyboard_window import KeyboardWindow
 from doubao_murmur.params_store import ParamsStore
-from doubao_murmur.paste.paste_helper import PasteHelper
+from doubao_murmur.paste.delivery import DeliveryOutcome, TextDelivery
 from doubao_murmur.transcription import TranscriptionManager
 from doubao_murmur.ui.login_window import LoginWindow
 from doubao_murmur.ui.overlay import Overlay
@@ -48,6 +48,7 @@ class DoubaoMurmurApp(Gtk.Application):
         self.hotkey_manager: HotkeyManager | None = None
         self.transcription_manager: TranscriptionManager | None = None
         self.keyboard: KeyboardWindow | None = None
+        self.text_delivery: TextDelivery | None = None
         self._setup_done = False
 
     def do_activate(self):
@@ -75,6 +76,7 @@ class DoubaoMurmurApp(Gtk.Application):
         self.overlay = Overlay(self.app_state)
 
         # 3. Create transcription manager
+        self.text_delivery = TextDelivery(on_result=self._on_delivery_complete)
         self.transcription_manager = TranscriptionManager(self.app_state)
         self.transcription_manager.on_auth_expired = self._on_auth_expired
         self.transcription_manager.on_show_login = self._show_login
@@ -249,8 +251,24 @@ class DoubaoMurmurApp(Gtk.Application):
             callback(None)
 
     def _do_paste(self, text: str) -> None:
-        """Copy and paste transcription."""
-        PasteHelper.copy_and_paste(text)
+        """Submit delivery; recording cleanup must not wait for desktop tools."""
+        if self.text_delivery:
+            self.text_delivery.submit(text)
+
+    def _on_delivery_complete(self, outcome: DeliveryOutcome) -> None:
+        # Notifications do not take focus from the paste target or overwrite
+        # recording state: another recording may already be underway.
+        if outcome == DeliveryOutcome.PASTE_REQUESTED:
+            logger.info("Text copied and paste keystroke requested")
+            return
+        if outcome == DeliveryOutcome.COPIED_ONLY:
+            message = "文字已复制，但无法自动粘贴。请手动粘贴（终端使用 Ctrl+Shift+V）。"
+        else:
+            message = "无法复制识别结果，未发送粘贴按键。请检查剪贴板工具后重试。"
+        logger.warning(message)
+        notification = Gio.Notification.new("语音输入结果")
+        notification.set_body(message)
+        self.send_notification("text-delivery", notification)
 
     def _show_overlay(self) -> None:
         if self.overlay:
@@ -327,6 +345,8 @@ class DoubaoMurmurApp(Gtk.Application):
 
     def _quit(self) -> None:
         """Clean shutdown."""
+        if self.text_delivery:
+            self.text_delivery.close()
         if self.login_window:
             self.login_window.destroy()
         if self.transcription_manager:
