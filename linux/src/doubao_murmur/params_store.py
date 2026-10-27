@@ -33,13 +33,16 @@ class ParamsStore:
     """Persist ASR params to JSON file."""
 
     @staticmethod
-    def save(params: ASRParams) -> None:
+    def save(params: ASRParams) -> bool:
+        """Persist credentials, returning whether the write succeeded."""
         try:
             data = json.dumps(asdict(params), ensure_ascii=False, indent=2)
             get_params_path().write_text(data, encoding="utf-8")
             logger.info("Saved ASR params to %s", get_params_path())
+            return True
         except Exception as e:
             logger.error("Failed to save params: %s", e)
+            return False
 
     @staticmethod
     def load() -> ASRParams | None:

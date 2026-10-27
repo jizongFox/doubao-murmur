@@ -25,7 +25,7 @@ def test_x11_components_start(tmp_path, monkeypatch):
     Gtk.init()
     state = AppState()
     assert LoginWindow.is_available(), "GTK4 WebKitGTK 6 is required"
-    login = LoginWindow(state)
+    login = LoginWindow()
     listener = X11KeyListener(lambda: None, lambda valid: None, lambda: None)
     try:
         login._setup()  # Create the real WebView, but never load doubao.com.

@@ -25,7 +25,7 @@ def test_save_and_load():
         device_id="dev_001",
         web_id="web_002",
     )
-    ParamsStore.save(params)
+    assert ParamsStore.save(params) is True
 
     loaded = ParamsStore.load()
     assert loaded is not None

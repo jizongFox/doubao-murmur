@@ -48,6 +48,7 @@ class TranscriptionManager:
         self.on_auth_expired = None  # () -> None
         self.on_show_login = None  # () -> None
         self.on_params_needed = None  # (callback: (ASRParams|None)->None) -> None
+        self.on_save_params = None  # (ASRParams) -> bool, after recording acceptance
         self.on_overlay_show = None  # () -> None
         self.on_overlay_hide = None  # () -> None
         self.on_overlay_update = None  # (text: str) -> None
@@ -315,10 +316,12 @@ class TranscriptionManager:
             self.on_cancel_enabled_changed(new_state != RecordingState.IDLE)
 
     def _on_params_extracted(self, params: ASRParams | None) -> None:
-        """Called when WebView param extraction completes."""
-        if params:
-            ParamsStore.save(params)
-            self.asr_client.connect(params)
-        else:
+        """Persist and connect only after the recording accepts this completion."""
+        if params is None:
             self.app_state.error_message = "无法获取连接参数，请重新登录"
-            self._schedule_error_reset()
+        elif self.on_save_params is None or not self.on_save_params(params):
+            self.app_state.error_message = "无法保存登录凭证，请重试"
+        else:
+            self.asr_client.connect(params)
+            return
+        self._schedule_error_reset()
