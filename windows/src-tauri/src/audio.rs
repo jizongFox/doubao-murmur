@@ -71,6 +71,8 @@ impl AudioCapture {
         }
     }
 
+    /// Request asynchronous shutdown. The callback owns the audio sender; its
+    /// drop flushes the partial chunk and then closes the channel, signalling EOF.
     pub fn stop(&mut self) {
         if let Some(stop) = self.stop.take() {
             let _ = stop.send(());
@@ -147,7 +149,7 @@ where
 
 /// Per-callback conversion pipeline: interleaved native samples in, fixed-size
 /// 16 kHz Int16 chunks out.
-struct Pump<F> {
+struct Pump<F: Fn(Vec<u8>)> {
     channels: usize,
     resampler: Resampler,
     sink: F,
@@ -200,5 +202,64 @@ impl<F: Fn(Vec<u8>)> Pump<F> {
             }
             (self.sink)(bytes);
         }
+    }
+}
+
+impl<F: Fn(Vec<u8>)> Drop for Pump<F> {
+    fn drop(&mut self) {
+        // cpal drops the callback after its last invocation. Send the remaining
+        // converted samples before dropping the sink (and its channel sender).
+        if !self.pending.is_empty() {
+            let bytes = self.pending.drain(..).flat_map(i16::to_le_bytes).collect();
+            (self.sink)(bytes);
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn capture_drop_flushes_partial_chunk_before_closing_audio_channel() {
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        let mut pump = Pump::new(config::AUDIO_SAMPLE_RATE, 1, move |bytes| {
+            tx.send(bytes).unwrap();
+        });
+        pump.push_f32(&vec![0.5; config::audio_chunk_samples() + 7]);
+        let full = rx.try_recv().unwrap();
+        assert_eq!(full.len(), config::audio_chunk_samples() * 2);
+        drop(pump);
+        let tail = rx
+            .try_recv()
+            .expect("partial capture chunk must survive shutdown");
+        assert_eq!(tail.len(), 7 * 2);
+        assert!(tail.iter().any(|&byte| byte != 0));
+        assert_eq!(
+            rx.try_recv(),
+            Err(tokio::sync::mpsc::error::TryRecvError::Disconnected)
+        );
+    }
+
+    #[test]
+    fn empty_capture_does_not_emit_an_empty_chunk() {
+        let chunks = std::sync::Mutex::new(Vec::new());
+        drop(Pump::new(config::AUDIO_SAMPLE_RATE, 1, |bytes| {
+            chunks.lock().unwrap().push(bytes);
+        }));
+        assert!(chunks.into_inner().unwrap().is_empty());
+    }
+
+    #[test]
+    fn exact_capture_chunk_is_not_sent_twice_on_drop() {
+        let chunks = std::sync::Mutex::new(Vec::new());
+        let mut pump = Pump::new(config::AUDIO_SAMPLE_RATE, 1, |bytes| {
+            chunks.lock().unwrap().push(bytes);
+        });
+        pump.push_f32(&vec![0.5; config::audio_chunk_samples()]);
+        drop(pump);
+        let chunks = chunks.into_inner().unwrap();
+        assert_eq!(chunks.len(), 1);
+        assert_eq!(chunks[0].len(), config::audio_chunk_samples() * 2);
     }
 }

@@ -68,6 +68,9 @@ pub fn stop_trailing_silence_chunks() -> usize {
 // --- Timeouts ---
 
 pub const CONNECT_TIMEOUT: Duration = Duration::from_secs(5);
+/// Bound each socket write, including flushing speech and trailing silence.
+/// This is independent of waiting for final results after all audio is sent.
+pub const AUDIO_SEND_TIMEOUT: Duration = Duration::from_secs(5);
 pub const STOP_SAFETY_TIMEOUT: Duration = Duration::from_millis(1500);
 /// The result stream must stay quiet this long before the transcript is accepted.
 /// After the audio ends the server replays pending partials before sending the

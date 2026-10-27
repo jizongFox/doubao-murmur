@@ -210,11 +210,10 @@ impl Controller {
         // The channel is created before the socket so audio captured during the
         // handshake queues up instead of being lost.
         let (audio_tx, audio_rx) = tokio::sync::mpsc::unbounded_channel::<Vec<u8>>();
-        let sink = audio_tx.clone();
-        drop(audio_tx);
-
+        // This callback must own the only sender: its drop is the transport's
+        // ordered end-of-capture signal, even though stop() is asynchronous.
         if let Err(e) = self.audio.start(move |chunk| {
-            let _ = sink.send(chunk);
+            let _ = audio_tx.send(chunk);
         }) {
             log_error!("Audio capture failed: {e}");
             self.push_overlay(Some("麦克风启动失败"));
@@ -249,10 +248,9 @@ impl Controller {
         log_info!("Stopping recording");
         self.set_state(RecordingState::Stopping);
         self.audio.stop();
-        // Flushes trailing silence so the server finalises the last word.
-        self.asr.finish_sending();
-        self.awaiting_final = true;
-        self.later(config::STOP_SAFETY_TIMEOUT, Event::SafetyTimeout(self.generation));
+        // Final-result deadlines start only after capture EOF and transport
+        // draining, not while the handshake or queued speech is still pending.
+        self.awaiting_final = false;
     }
 
     /// Wait for the result stream to go quiet before accepting the transcript.
@@ -310,6 +308,23 @@ impl Controller {
                     self.push_overlay(None);
                 }
             }
+            AsrEvent::AudioDrained => {
+                // The capture callback may also disappear after a device failure.
+                // EOF is terminal for audio even if no stop hotkey arrived.
+                if matches!(
+                    self.state,
+                    RecordingState::Starting | RecordingState::Recording
+                ) {
+                    self.stop_recording();
+                }
+                if self.state == RecordingState::Stopping {
+                    self.awaiting_final = true;
+                    self.later(
+                        config::STOP_SAFETY_TIMEOUT,
+                        Event::SafetyTimeout(self.generation),
+                    );
+                }
+            }
             AsrEvent::Result(text) => {
                 self.text = text;
                 if self.state == RecordingState::Starting {
@@ -322,11 +337,10 @@ impl Controller {
                 }
             }
             AsrEvent::Finished => {
-                self.awaiting_final = false;
-                if matches!(
-                    self.state,
-                    RecordingState::Stopping | RecordingState::Recording
-                ) {
+                if self.state == RecordingState::Recording
+                    || (self.state == RecordingState::Stopping && self.awaiting_final)
+                {
+                    self.awaiting_final = false;
                     self.complete();
                 }
             }
