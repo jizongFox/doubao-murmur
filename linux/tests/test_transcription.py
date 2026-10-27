@@ -1,5 +1,6 @@
 """Recording lifecycle tests without microphone, network, or real timers."""
 
+from types import SimpleNamespace
 from unittest.mock import Mock
 
 import pytest
@@ -94,6 +95,39 @@ def test_exit_cleans_up_once_without_pasting(recording, auth_failure):
     manager.audio_capture.stop.assert_called_once_with()
     manager.asr_client.disconnect.assert_called_once_with()
     manager.on_paste.assert_not_called()
+    assert manager.app_state.recording_state == RecordingState.IDLE
+
+
+def test_rejected_cached_login_cleans_up_and_prompts_login(recording):
+    manager, _ = recording
+    manager.handle_start()
+    manager.app_state.transcription_text = "unfinished"
+    error = SimpleNamespace(response=SimpleNamespace(
+        status_code=200,
+        body=b'{"code":710012001,"message":"login invalid"}',
+    ))
+
+    manager._on_asr_error(error)
+
+    module.ParamsStore.clear.assert_called_once_with()
+    manager.on_auth_expired.assert_called_once_with()
+    manager.audio_capture.stop.assert_called_once_with()
+    manager.asr_client.disconnect.assert_called_once_with()
+    manager.on_paste.assert_not_called()
+    assert manager.app_state.login_status == LoginStatus.NOT_LOGGED_IN
+    assert manager.app_state.recording_state == RecordingState.IDLE
+
+
+def test_cancelled_recording_ignores_late_auth_error(recording):
+    manager, _ = recording
+    manager.handle_start()
+    manager.handle_cancel()
+
+    manager._on_auth_error()
+
+    module.ParamsStore.clear.assert_not_called()
+    manager.on_auth_expired.assert_not_called()
+    assert manager.app_state.login_status == LoginStatus.LOGGED_IN
     assert manager.app_state.recording_state == RecordingState.IDLE
 
 
