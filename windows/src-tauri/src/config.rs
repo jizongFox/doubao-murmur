@@ -32,7 +32,9 @@ pub const FIXED_QUERY_PARAMS: &[(&str, &str)] = &[
 
 // --- Auth error detection ---
 
-pub const AUTH_ERROR_CODE: i64 = 709_599_054;
+// Keep aligned with Linux: generic invalid login, rejected handshake body,
+// and tourist-limit response sent before an expired connection closes.
+pub const AUTH_ERROR_CODES: &[i64] = &[709_599_054, 710_012_001, 710_022_013];
 pub const AUTH_ERROR_KEYWORDS: &[&str] = &[
     "cookie",
     "auth",

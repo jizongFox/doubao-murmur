@@ -92,7 +92,6 @@ pub fn spawn(app: &AppHandle, settings: Settings) {
         generation: 0,
         logged_in: params::has_saved(),
         text: String::new(),
-        using_cached: false,
         awaiting_final: false,
         quiet_epoch: 0,
         asr: AsrClient::new(),
@@ -112,7 +111,6 @@ struct Controller {
     generation: u64,
     logged_in: bool,
     text: String,
-    using_cached: bool,
     awaiting_final: bool,
     /// Bumped each time completion is rescheduled, so only the newest
     /// `StreamQuiet` event is honoured.
@@ -227,7 +225,6 @@ impl Controller {
         match params::load() {
             Some(params) => {
                 log_info!("Using cached ASR params");
-                self.using_cached = true;
                 self.connect(params, audio_rx);
             }
             None => {
@@ -338,16 +335,15 @@ impl Controller {
                     return;
                 }
                 log_error!("ASR error: {message}");
-                if self.using_cached {
-                    // Stale cookies are by far the likeliest cause when we reused
-                    // saved credentials.
+                self.push_overlay(Some("连接出错"));
+                self.schedule_reset(config::AUTH_EXPIRY_DELAY);
+            }
+            AsrEvent::AuthError => {
+                // A cancelled handshake can still report its terminal event.
+                if self.state != RecordingState::Idle {
                     self.handle_auth_failure();
-                } else {
-                    self.push_overlay(Some("连接出错"));
-                    self.schedule_reset(config::AUTH_EXPIRY_DELAY);
                 }
             }
-            AsrEvent::AuthError => self.handle_auth_failure(),
         }
     }
 
@@ -369,7 +365,6 @@ impl Controller {
         self.awaiting_final = false;
         self.audio.stop();
         self.asr.disconnect();
-        self.using_cached = false;
         self.text.clear();
         self.set_state(RecordingState::Idle);
         overlay::hide(&self.app);
@@ -378,7 +373,6 @@ impl Controller {
     fn handle_auth_failure(&mut self) {
         log_warn!("Auth failure, clearing cached params");
         params::clear();
-        self.using_cached = false;
         self.logged_in = false;
         self.reset_to_idle();
         self.refresh_tray();

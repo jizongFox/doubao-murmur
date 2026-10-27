@@ -8,19 +8,22 @@
 use futures_util::{SinkExt, StreamExt};
 use tokio::sync::mpsc::{unbounded_channel, UnboundedReceiver, UnboundedSender};
 use tokio_tungstenite::tungstenite::client::IntoClientRequest;
-use tokio_tungstenite::tungstenite::http::HeaderValue;
-use tokio_tungstenite::tungstenite::Message;
+use tokio_tungstenite::tungstenite::http::{HeaderValue, StatusCode};
+use tokio_tungstenite::tungstenite::protocol::frame::coding::CloseCode;
+use tokio_tungstenite::tungstenite::{Error, Message};
 
 use crate::config;
 use crate::params::AsrParams;
 use crate::{log_error, log_info, log_warn};
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum AsrEvent {
     Opened,
     Result(String),
     Finished,
+    /// Network/protocol failure; must not invalidate saved credentials.
     Error(String),
+    /// Login rejected by the service; the controller owns clearing and prompting.
     AuthError,
 }
 
@@ -154,7 +157,7 @@ async fn run<F: Fn(AsrEvent)>(
         Ok(Ok((socket, _response))) => socket,
         Ok(Err(e)) => {
             log_error!("WebSocket connect failed: {e}");
-            emit(AsrEvent::Error(e.to_string()));
+            emit(handshake_failure(e));
             return;
         }
         Err(_) => {
@@ -169,7 +172,8 @@ async fn run<F: Fn(AsrEvent)>(
     emit(AsrEvent::Opened);
 
     let mut sending = true;
-    let mut closed_by_us = false;
+    let mut report_close_error = true;
+    let mut received_any = false;
 
     loop {
         tokio::select! {
@@ -190,7 +194,7 @@ async fn run<F: Fn(AsrEvent)>(
                     sending = false;
                 }
                 Some(Ctl::Disconnect) | None => {
-                    closed_by_us = true;
+                    report_close_error = false;
                     break;
                 }
             },
@@ -207,20 +211,24 @@ async fn run<F: Fn(AsrEvent)>(
 
             incoming = read.next() => match incoming {
                 Some(Ok(Message::Text(text))) => {
+                    received_any = true;
                     if handle_message(&text, &emit) {
-                        closed_by_us = true;
+                        report_close_error = false;
                         break;
                     }
                 }
                 Some(Ok(Message::Binary(bytes))) => {
+                    received_any = true;
                     let text = String::from_utf8_lossy(&bytes).into_owned();
                     if handle_message(&text, &emit) {
-                        closed_by_us = true;
+                        report_close_error = false;
                         break;
                     }
                 }
                 Some(Ok(Message::Close(frame))) => {
                     log_info!("Server closed the socket: {frame:?}");
+                    emit(server_close_event(received_any, frame.map(|frame| frame.code)));
+                    report_close_error = false; // A terminal event was already reported.
                     break;
                 }
                 Some(Ok(_)) => {}
@@ -234,7 +242,7 @@ async fn run<F: Fn(AsrEvent)>(
         }
     }
 
-    if !closed_by_us {
+    if report_close_error {
         emit(AsrEvent::Error("连接已关闭".to_string()));
     }
 
@@ -301,13 +309,53 @@ fn handle_message(text: &str, emit: &dyn Fn(AsrEvent)) -> bool {
 }
 
 pub fn is_auth_error(code: i64, message: &str) -> bool {
-    if code == config::AUTH_ERROR_CODE {
+    if config::AUTH_ERROR_CODES.contains(&code) {
         return true;
     }
     let lower = message.to_lowercase();
     config::AUTH_ERROR_KEYWORDS
         .iter()
         .any(|keyword| lower.contains(keyword))
+}
+
+fn handshake_failure(error: Error) -> AsrEvent {
+    // Classify protocol evidence here, not in the controller based on where
+    // credentials came from. A timeout, DNS failure, or gateway error says
+    // nothing about whether a saved login is still valid.
+    let rejected = match &error {
+        Error::Http(response) => match response.status() {
+            StatusCode::UNAUTHORIZED | StatusCode::FORBIDDEN => true,
+            StatusCode::OK => response
+                .body()
+                .as_deref()
+                .and_then(|body| serde_json::from_slice::<serde_json::Value>(body).ok())
+                .map(|value| {
+                    let code = value.get("code").and_then(|c| c.as_i64()).unwrap_or(0);
+                    let message = value.get("message").and_then(|m| m.as_str()).unwrap_or("");
+                    code != 0 && is_auth_error(code, message)
+                })
+                .unwrap_or(false),
+            _ => false,
+        },
+        _ => false,
+    };
+    if rejected {
+        AsrEvent::AuthError
+    } else {
+        AsrEvent::Error(error.to_string())
+    }
+}
+
+fn server_close_event(received_any: bool, code: Option<CloseCode>) -> AsrEvent {
+    // The service accepts an expired login's handshake, then closes normally
+    // before sending any data. A valid stream may also end with 1000 after
+    // results. Only the first case is authentication rejection (as on Linux).
+    // Our own disconnect is handled by Ctl::Disconnect, never this classifier.
+    if !received_any && code == Some(CloseCode::Normal) {
+        AsrEvent::AuthError
+    } else {
+        AsrEvent::Error("连接已关闭".to_string())
+    }
 }
 
 #[cfg(test)]
@@ -362,7 +410,9 @@ mod tests {
 
     #[test]
     fn auth_errors_are_recognised() {
-        assert!(is_auth_error(config::AUTH_ERROR_CODE, ""));
+        for code in config::AUTH_ERROR_CODES {
+            assert!(is_auth_error(*code, ""));
+        }
         assert!(is_auth_error(1, "Cookie is invalid"));
         assert!(is_auth_error(2, "AUTH failed"));
         assert!(is_auth_error(3, "session expired"));
@@ -372,6 +422,95 @@ mod tests {
     fn unrelated_errors_are_not_auth_errors() {
         assert!(!is_auth_error(500, "internal server error"));
         assert!(!is_auth_error(42, "rate limited"));
+    }
+
+    fn http_failure(status: u16, body: Option<&[u8]>) -> AsrEvent {
+        let response = tokio_tungstenite::tungstenite::http::Response::builder()
+            .status(status)
+            .body(body.map(|body| body.to_vec()))
+            .unwrap();
+        handshake_failure(Error::Http(response))
+    }
+
+    #[test]
+    fn handshake_authentication_rejections_have_a_distinct_event() {
+        for status in [401, 403] {
+            assert_eq!(http_failure(status, None), AsrEvent::AuthError);
+        }
+        assert_eq!(
+            http_failure(200, Some(br#"{"code":710012001,"message":"login invalid"}"#)),
+            AsrEvent::AuthError
+        );
+        assert_eq!(
+            http_failure(200, Some(br#"{"code":710012001}"#)),
+            AsrEvent::AuthError
+        );
+    }
+
+    #[test]
+    fn unrelated_or_incomplete_handshake_bodies_preserve_credentials() {
+        for body in [
+            None,
+            Some(b"".as_slice()),
+            Some(b"not json".as_slice()),
+            Some(br#"{"code":0,"message":"session"}"#.as_slice()),
+            Some(br#"{"code":42,"message":"rate limited"}"#.as_slice()),
+            Some(br#"["login invalid"]"#.as_slice()),
+        ] {
+            assert!(matches!(http_failure(200, body), AsrEvent::Error(_)));
+        }
+    }
+
+    #[test]
+    fn gateway_and_rate_limit_responses_are_not_login_rejections() {
+        for status in [429, 500, 502, 503] {
+            assert!(matches!(
+                http_failure(
+                    status,
+                    Some(br#"{"code":710012001,"message":"session backend unavailable"}"#)
+                ),
+                AsrEvent::Error(_)
+            ));
+        }
+    }
+
+    #[test]
+    fn timeouts_dns_and_connection_resets_do_not_expire_login() {
+        for kind in [
+            std::io::ErrorKind::TimedOut,
+            std::io::ErrorKind::NotFound,
+            std::io::ErrorKind::ConnectionReset,
+        ] {
+            let error = Error::Io(std::io::Error::new(kind, "network unavailable"));
+            assert!(matches!(handshake_failure(error), AsrEvent::Error(_)));
+        }
+    }
+
+    #[test]
+    fn only_a_normal_server_close_before_data_indicates_expired_login() {
+        assert_eq!(
+            server_close_event(false, Some(CloseCode::Normal)),
+            AsrEvent::AuthError
+        );
+        assert!(matches!(
+            server_close_event(true, Some(CloseCode::Normal)),
+            AsrEvent::Error(_)
+        ));
+        for code in [None, Some(CloseCode::Away), Some(CloseCode::Error)] {
+            assert!(matches!(server_close_event(false, code), AsrEvent::Error(_)));
+            assert!(matches!(server_close_event(true, code), AsrEvent::Error(_)));
+        }
+    }
+
+    #[test]
+    fn tourist_limit_and_login_invalid_stop_listening_after_one_auth_event() {
+        for code in config::AUTH_ERROR_CODES {
+            let seen = std::sync::Mutex::new(Vec::new());
+            let emit = |event: AsrEvent| seen.lock().unwrap().push(event);
+            let text = format!(r#"{{"code":{code},"result":null}}"#);
+            assert!(handle_message(&text, &emit));
+            assert_eq!(*seen.lock().unwrap(), vec![AsrEvent::AuthError]);
+        }
     }
 
     #[test]
