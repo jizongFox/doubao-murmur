@@ -32,7 +32,8 @@ class TranscriptionManager:
 
     def __init__(self, app_state: AppState) -> None:
         self.app_state = app_state
-        self.asr_client = ASRClient()
+        self.asr_client: ASRClient | None = None
+        self._session: object | None = None
         self.audio_capture = AudioCapture()
 
         self.using_cached_params = False
@@ -53,21 +54,22 @@ class TranscriptionManager:
         self.on_paste = None  # (text: str) -> None
         self.on_cancel_enabled_changed = None  # (enabled: bool) -> None
 
-        self._wire_asr_callbacks()
+    def _wire_asr_callbacks(self, session: object) -> None:
+        """Marshal callbacks to GTK and check their session when dispatched."""
+        def dispatch(callback, *args):
+            GLib.idle_add(self._dispatch_session_callback, session, callback, *args)
 
-    def _wire_asr_callbacks(self) -> None:
-        """Wire ASR client callbacks to marshal from asyncio to GTK thread."""
-        self.asr_client.on_open = lambda: GLib.idle_add(self._on_asr_open)
-        self.asr_client.on_result = lambda text: GLib.idle_add(
-            self._on_asr_result, text
-        )
-        self.asr_client.on_finish = lambda: GLib.idle_add(self._on_asr_finish)
-        self.asr_client.on_error = lambda err: GLib.idle_add(
-            self._on_asr_error, err
-        )
-        self.asr_client.on_auth_error = lambda: GLib.idle_add(
-            self._on_auth_error
-        )
+        self.asr_client.on_open = lambda: dispatch(self._on_asr_open)
+        self.asr_client.on_result = lambda text: dispatch(self._on_asr_result, text)
+        self.asr_client.on_finish = lambda: dispatch(self._on_asr_finish)
+        self.asr_client.on_error = lambda err: dispatch(self._on_asr_error, err)
+        self.asr_client.on_auth_error = lambda: dispatch(self._on_auth_error)
+
+    def _dispatch_session_callback(self, session: object, callback, *args) -> bool:
+        """Old recordings cannot mutate state, even after a new one starts."""
+        if session is self._session:
+            callback(*args)
+        return GLib.SOURCE_REMOVE
 
     # --- Recording controls ---
 
@@ -102,6 +104,11 @@ class TranscriptionManager:
 
         logger.info("Starting recording...")
         self._cancel_pending_timers()
+        session = self._session = object()
+        # Each recording owns its transport and buffered audio. Never reuse a
+        # client while its previous connection may still be shutting down.
+        self.asr_client = ASRClient()
+        self._wire_asr_callbacks(session)
         self._set_state(RecordingState.STARTING)
         self.app_state.transcription_text = ""
         self.app_state.error_message = None
@@ -125,7 +132,11 @@ class TranscriptionManager:
             self.asr_client.connect(cached)
         elif self.on_params_needed:
             self.using_cached_params = False
-            self.on_params_needed(self._on_params_extracted)
+            self.on_params_needed(
+                lambda params: self._dispatch_session_callback(
+                    session, self._on_params_extracted, params
+                )
+            )
         else:
             self.app_state.error_message = "无法获取连接参数，请重新登录"
             self._schedule_error_reset()
@@ -266,10 +277,13 @@ class TranscriptionManager:
         self._reset_to_idle()
 
     def _reset_to_idle(self) -> bool:
+        # Invalidate queued callbacks before stopping the resources that emit them.
+        self._session = None
         self.awaiting_final_result = False
         self._cancel_pending_timers()
         self.audio_capture.stop()
-        self.asr_client.disconnect()
+        if self.asr_client:
+            self.asr_client.disconnect()
         self._set_state(RecordingState.IDLE)
         self.app_state.error_message = None
         if self.on_overlay_hide:
