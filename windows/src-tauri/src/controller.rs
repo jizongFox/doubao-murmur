@@ -309,6 +309,14 @@ impl Controller {
                 }
             }
             AsrEvent::AudioDrained => {
+                // The capture callback may also disappear after a device failure.
+                // EOF is terminal for audio even if no stop hotkey arrived.
+                if matches!(
+                    self.state,
+                    RecordingState::Starting | RecordingState::Recording
+                ) {
+                    self.stop_recording();
+                }
                 if self.state == RecordingState::Stopping {
                     self.awaiting_final = true;
                     self.later(
