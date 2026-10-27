@@ -99,7 +99,7 @@ class DoubaoMurmurApp(Gtk.Application):
         # Prefer the X11 listener: it sees both physical keys and
         # XTEST-injected ones (Steam Input desktop layouts inject
         # controller-mapped keys via XTEST, invisible to evdev).
-        # evdev runs as a fallback in case X11 listener fails to start.
+        # Run evdev alongside X11: native Wayland windows bypass XRecord.
         x11 = None
         evdev = None
         if X11KeyListener.is_available():
@@ -117,7 +117,6 @@ class DoubaoMurmurApp(Gtk.Application):
             )
 
         self.hotkey_manager.start(
-            overlay_button=None,
             evdev_listener=evdev,
             x11_listener=x11,
         )
