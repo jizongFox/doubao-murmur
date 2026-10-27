@@ -41,11 +41,47 @@ SteamOS 桌面模式自带的虚拟键盘不能移动、不能缩放，常挡住
 
 - **OS**: SteamOS 3 / Arch Linux / 其他支持 GTK4 的 Linux 发行版
 - **音频**: PipeWire (SteamOS 默认) 或 PulseAudio
-- **Python**: 3.11+
+- **Python**: 3.10+
 - **桌面环境**: KDE Plasma (推荐) 或 GNOME
 - **显示协议**: **X11 会话开箱即用**；Wayland 会话需要额外配置且功能受限，见 [下文](#-wayland--gnome-用户须知)
 
 ## 🚀 安装
+
+### Ubuntu 22.04: X11 源码安装
+
+登录界面点击齿轮，选择 **Ubuntu on Xorg**。`echo "$XDG_SESSION_TYPE"` 应输出
+`x11`。先安装 Ubuntu 官方更新（需要启用 `jammy-updates` / `jammy-security`）；
+当前更新仓库提供 GTK4 版 WebKitGTK 6。不要用 GTK3 的 WebKit2 4.1 替代它。
+
+```bash
+sudo apt update
+sudo apt install python3-venv python3-gi python3-gi-cairo \
+  gir1.2-gtk-4.0 gir1.2-webkit-6.0 libportaudio2 xdotool xclip x11-utils
+cd linux
+/usr/bin/python3 -m venv --system-site-packages .venv
+.venv/bin/python -m pip install --upgrade pip
+.venv/bin/python -m pip install -e '.[dev]'
+.venv/bin/python -m doubao_murmur
+```
+
+使用系统 Python 是为了复用 Ubuntu 的 GI / GTK；`websockets`、`sounddevice`
+和 `python-xlib` 由项目依赖安装进虚拟环境，不需要 PPA 或替换系统 Python。
+如果 apt 找不到 `gir1.2-webkit-6.0`，请检查官方更新源或使用下文 Flatpak，
+不要继续安装不完整的原生环境。
+
+X11 下全局热键使用 XRecord，复制/粘贴可使用 `xclip` / `xdotool`；
+无需加入 `input` 组，也不需要 `ydotool`。Ubuntu GNOME 的托盘需要启用
+Ubuntu AppIndicators 扩展；即使托盘不可见，再启动一次应用也可打开控制面板。
+录音仍需要可用的 PulseAudio / PipeWire 音频服务。
+
+```bash
+.venv/bin/python -m pytest tests/ -q
+# 可选的隔离 X11 启动检查（不登录、不录音）：
+sudo apt install xvfb
+xvfb-run -a env DOUBAO_X11_SMOKE=1 .venv/bin/python -m pytest tests/test_x11_smoke.py -q
+```
+
+下面的 `.deb` 包仍面向 Ubuntu 26.04；22.04 请使用本节的虚拟环境或 Flatpak。
 
 ### Ubuntu 26.04: `.deb`
 
@@ -196,6 +232,24 @@ Bluefin 等定制版默认带这个扩展。没有托盘时，再执行一次
 粘贴走 wtype/libei）尚未实现，欢迎 PR。
 
 ## 🏗 项目结构
+
+### 桌面适配开发边界
+
+不要按 Ubuntu 版本分叉业务逻辑；22.04 / 26.04 均可能运行 X11 或 Wayland。
+`desktop.is_x11_session()` 是宿主会话策略入口，优先使用 `XDG_SESSION_TYPE`，
+缺失时才检查显示环境变量。`GDK_BACKEND=x11` 只表示本应用使用 XWayland，
+不代表整个桌面是 X11。
+
+- `HotkeyManager.start()`：X11 上优先仅运行 XRecord；失败时保留 evdev 后备。
+  Wayland 上仍同时运行可用的 XRecord / evdev，覆盖原生 Wayland 窗口。
+- `PasteHelper`：X11 优先 `xdotool`，失败后保留其他可用后端；Wayland 保留
+  uinput / ydotool 等现有顺序。调用者只传文本，不选择桌面后端。
+- `ui/windowing.py`：继续负责 GTK 窗口提示和实际 surface 能力判断；
+  不把窗口后端误当作宿主会话。
+- 录音、ASR、凭证和配置文件不依赖发行版或桌面会话；WebKit 登录统一使用 GTK4 版 6.0。
+
+更改会话判定时测试 `test_desktop.py`；更改后端优先级时测试 hotkey / paste
+用例。真实 X11 启动检查单独在 Xvfb 中运行，避免单元测试读取键盘或注入按键。
 
 ```
 linux/

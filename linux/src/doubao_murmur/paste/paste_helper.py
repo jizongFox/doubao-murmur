@@ -17,6 +17,7 @@ import time
 
 from doubao_murmur.config import PASTE_DELAY
 from doubao_murmur.host_tools import command_candidates
+from doubao_murmur.desktop import is_x11_session
 from doubao_murmur.paste.kwin_window import active_window_class as kwin_active_window_class
 from doubao_murmur.paste.uinput_injector import UinputPaster
 
@@ -133,6 +134,12 @@ class PasteHelper:
         Terminals use Ctrl+Shift+V; everything else uses Ctrl+V.
         """
         use_shift = PasteHelper._focused_window_is_terminal()
+        x11_session = is_x11_session()
+
+        # A native X11 desktop needs no uinput permissions or daemon. Do not
+        # take this shortcut on Wayland merely because XWayland sets DISPLAY.
+        if x11_session and PasteHelper._paste_with_xdotool(use_shift):
+            return
 
         # Try uinput first: kernel-level injection that works on both
         # Wayland and X11 with no external tools. Gated on /dev/uinput
@@ -180,6 +187,18 @@ class PasteHelper:
                 logger.warning("wtype failed: %s", e)
 
         # Try xdotool (X11 only)
+        if not x11_session and PasteHelper._paste_with_xdotool(use_shift):
+            return
+
+        logger.error("No paste simulation method available")
+        logger.info(
+            "Text was copied to clipboard but could not auto-paste. "
+            "Install xdotool on X11 or configure ydotool on Wayland."
+        )
+
+    @staticmethod
+    def _paste_with_xdotool(use_shift: bool) -> bool:
+        """Try local/Flatpak host X11 injection, reporting success for fallback."""
         xdotool_key = "ctrl+shift+v" if use_shift else "ctrl+v"
         for command in command_candidates("xdotool"):
             try:
@@ -189,15 +208,10 @@ class PasteHelper:
                     timeout=3,
                 )
                 logger.info("Paste simulated via xdotool (%s)", xdotool_key)
-                return
+                return True
             except Exception as e:
                 logger.warning("xdotool failed: %s", e)
-
-        logger.error("No paste simulation method available")
-        logger.info(
-            "Text was copied to clipboard but could not auto-paste. "
-            "Install ydotool or wtype for auto-paste."
-        )
+        return False
 
     @staticmethod
     def _focused_window_is_terminal() -> bool:

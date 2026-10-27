@@ -186,8 +186,9 @@ class DoubaoMurmurApp(Gtk.Application):
             )
             dialog.set_property(
                 "secondary-text",
-                "请安装 webkitgtk-6.0 以使用登录功能。\n"
-                "sudo pacman -S webkitgtk-6.0",
+                "需要 GTK4 版 WebKitGTK 6。Ubuntu 请启用官方更新源后安装：\n"
+                "sudo apt install gir1.2-webkit-6.0\n"
+                "其他发行版请参考 Linux README。",
             )
             dialog.connect("response", lambda d, _: d.destroy())
             dialog.present()

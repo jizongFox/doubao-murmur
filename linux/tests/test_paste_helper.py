@@ -8,6 +8,20 @@ import pytest
 from doubao_murmur.paste.paste_helper import PasteHelper
 
 
+@pytest.fixture(autouse=True)
+def isolate_desktop_backends(monkeypatch):
+    """Never inject real keys or query the running compositor in unit tests."""
+    monkeypatch.setenv("XDG_SESSION_TYPE", "wayland")
+    with patch(
+        "doubao_murmur.paste.paste_helper.UinputPaster.is_available",
+        return_value=False,
+    ), patch(
+        "doubao_murmur.paste.paste_helper.kwin_active_window_class",
+        return_value="",
+    ):
+        yield
+
+
 class TestCopyToClipboard:
     def test_wl_copy_preferred(self):
         with patch("shutil.which", return_value="/usr/bin/wl-copy") as mock_which, \
@@ -38,6 +52,38 @@ class TestCopyToClipboard:
 
 
 class TestSimulatePaste:
+    @pytest.mark.parametrize("terminal", [False, True])
+    def test_native_x11_uses_xdotool_without_uinput(self, monkeypatch, terminal):
+        monkeypatch.setenv("XDG_SESSION_TYPE", "x11")
+        with patch("shutil.which", return_value="/usr/bin/xdotool"), \
+             patch.object(PasteHelper, "_focused_window_is_terminal", return_value=terminal), \
+             patch("doubao_murmur.paste.paste_helper.UinputPaster.is_available") as uinput, \
+             patch("subprocess.run") as run:
+            PasteHelper._simulate_paste()
+            run.assert_called_once_with(
+                ["xdotool", "key", "ctrl+shift+v" if terminal else "ctrl+v"],
+                check=True, timeout=3,
+            )
+            uinput.assert_not_called()
+
+    def test_x11_failure_keeps_ydotool_fallback(self, monkeypatch):
+        monkeypatch.setenv("XDG_SESSION_TYPE", "x11")
+        with patch("shutil.which", return_value="/usr/bin/tool"), \
+             patch.object(PasteHelper, "_focused_window_is_terminal", return_value=False), \
+             patch("subprocess.run", side_effect=[OSError("xdotool failed"), MagicMock()]) as run:
+            PasteHelper._simulate_paste()
+            assert [call.args[0][0] for call in run.call_args_list] == ["xdotool", "ydotool"]
+
+    def test_wayland_with_xwayland_keeps_uinput_first(self, monkeypatch):
+        monkeypatch.setenv("DISPLAY", ":0")
+        with patch.object(PasteHelper, "_focused_window_is_terminal", return_value=False), \
+             patch("doubao_murmur.paste.paste_helper.UinputPaster.is_available", return_value=True), \
+             patch("doubao_murmur.paste.paste_helper.UinputPaster.paste", return_value=True) as paste, \
+             patch("subprocess.run") as run:
+            PasteHelper._simulate_paste()
+            paste.assert_called_once_with(use_shift=False)
+            run.assert_not_called()
+
     def test_ydotool_preferred(self):
         with patch("shutil.which", return_value="/usr/bin/ydotool"), \
              patch.object(PasteHelper, "_focused_window_is_terminal",
