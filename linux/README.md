@@ -88,10 +88,40 @@ xvfb-run -a env DOUBAO_X11_SMOKE=1 .venv/bin/python -m pytest tests/test_x11_smo
 从源码构建并安装原生包：
 
 ```bash
+sudo apt install dpkg-dev make
 cd linux
 make deb
 sudo apt install ./dist/doubao-murmur_*_all.deb
 ```
+
+只构建、不安装时运行 `make deb` 即可；产物在 `linux/dist/`。当前默认包名是
+`doubao-murmur_1.5.1+wayland8_all.deb`，升级时会保留原有登录信息。
+
+**GitHub 自动构建 / 下载**：打开仓库 **Actions → Ubuntu 26.04 Debian package**，
+选择成功的运行，在 **Artifacts** 下载 `doubao-murmur-ubuntu-26.04-<commit>`。
+解压后在该目录执行：
+
+```bash
+sha256sum -c SHA256SUMS
+sudo apt install ./doubao-murmur_*_all.deb
+```
+
+工作流在 Linux 相关 PR、`master` 更新时运行；也可以在合并工作流后用
+**Run workflow** 手动触发。CI 在真正的 Ubuntu 26.04 容器中安装 `.deb`、
+解析 apt 依赖，并针对已安装的代码运行测试及隔离 X11 启动检查。
+它不等同于真实 GNOME Wayland 下的录音/粘贴测试，也不会自动安装到你的电脑。
+构建产物保留 30 天。
+
+**长期保留到 Releases**：在已通过检查的提交上创建专用 Debian 发布 tag：
+
+```bash
+git tag deb-v1.5.1+wayland8
+git push origin deb-v1.5.1+wayland8
+```
+
+`deb-v` 后的部分就是 Debian 包版本（可用 `DEB_VERSION=... make deb` 本地覆盖）。
+后续发布使用新的、递增的版本，不复用已有 tag。
+`deb-v*` 仅触发 Debian 发布，不触发原来的 `v*` macOS / Windows / Flatpak 发布。
 
 安装不会删除 `~/.config/doubao-murmur/` 中已有的登录信息。Wayland 下首次安装后，
 再完成一次输入权限和自动粘贴设置，然后注销并重新登录：

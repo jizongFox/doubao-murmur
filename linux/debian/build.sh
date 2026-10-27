@@ -12,7 +12,8 @@ if ! command -v dpkg-deb >/dev/null 2>&1; then
 fi
 
 APP_VERSION=$(sed -n 's/^version = "\([^"]*\)"/\1/p' "$LINUX_DIR/pyproject.toml" | head -n 1)
-DEB_VERSION=${DEB_VERSION:-"${APP_VERSION}+wayland7"}
+DEB_VERSION=${DEB_VERSION:-"${APP_VERSION}+wayland8"}
+dpkg --validate-version "$DEB_VERSION"
 PACKAGE_ROOT=$(mktemp -d)
 trap 'rm -rf "$PACKAGE_ROOT"' EXIT HUP INT TERM
 chmod 0755 "$PACKAGE_ROOT"
