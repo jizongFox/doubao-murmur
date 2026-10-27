@@ -38,7 +38,7 @@ logger = logging.getLogger(__name__)
 
 
 class ASRClient:
-    """WebSocket client for Doubao's streaming ASR service."""
+    """WebSocket transport for one recording, including its buffered audio."""
 
     def __init__(self) -> None:
         self._ws: Any | None = None
@@ -47,6 +47,8 @@ class ASRClient:
         self._lock = threading.Lock()
         self._loop: asyncio.AbstractEventLoop | None = None
         self._thread: threading.Thread | None = None
+        self._task: asyncio.Task | None = None
+        self._disconnect_requested = threading.Event()
 
         # Callbacks (called from asyncio thread - must use GLib.idle_add for GTK)
         self.on_open = None  # () -> None
@@ -60,17 +62,50 @@ class ASRClient:
         return self._connected
 
     def connect(self, params: ASRParams) -> None:
-        """Start WebSocket connection on a background asyncio loop."""
-        self._loop = asyncio.new_event_loop()
-        self._thread = threading.Thread(
-            target=self._run_loop, args=(params,), daemon=True
-        )
+        """Start this recording's connection on a background asyncio loop."""
+        with self._lock:
+            if self._disconnect_requested.is_set():
+                return
+            if self._loop is not None:
+                raise RuntimeError("Create a new ASRClient for each recording")
+            self._loop = asyncio.new_event_loop()
+            self._thread = threading.Thread(
+                target=self._run_loop, args=(params,), daemon=True
+            )
         self._thread.start()
 
     def _run_loop(self, params: ASRParams) -> None:
-        """Run asyncio event loop in background thread."""
-        asyncio.set_event_loop(self._loop)
-        self._loop.run_until_complete(self._connect_and_listen(params))
+        """Own the connection task and release its loop on every exit path."""
+        loop = self._loop
+        asyncio.set_event_loop(loop)
+        self._task = loop.create_task(self._connect_and_listen(params))
+        if self._disconnect_requested.is_set():
+            self._task.cancel()
+        try:
+            loop.run_until_complete(self._task)
+        except asyncio.CancelledError:
+            pass  # Explicit disconnect, including cancellation during handshake.
+        finally:
+            with self._lock:
+                self._disconnect_requested.set()
+                self._connected = False
+                self._ws = None
+                self._pending_audio.clear()
+            # WebSocket keepalives and queued audio sends belong to this loop too.
+            pending = asyncio.all_tasks(loop)
+            for task in pending:
+                task.cancel()
+            loop.run_until_complete(asyncio.gather(*pending, return_exceptions=True))
+            loop.run_until_complete(loop.shutdown_asyncgens())
+            loop.run_until_complete(loop.shutdown_default_executor())
+            with self._lock:
+                loop.close()
+            asyncio.set_event_loop(None)
+
+    def _cancel_connection(self) -> None:
+        """Runs on the worker loop; disconnect() never blocks the GTK thread."""
+        if self._task and not self._task.done():
+            self._task.cancel()
 
     async def _connect_and_listen(self, params: ASRParams) -> None:
         """Build URL, connect, receive messages."""
@@ -103,8 +138,11 @@ class ASRClient:
             except TypeError:
                 ws = await websockets.connect(url, **connect_kwargs)
             try:
-                self._ws = ws
-                self._connected = True
+                with self._lock:
+                    if self._disconnect_requested.is_set():
+                        return
+                    self._ws = ws
+                    self._connected = True
                 logger.info("Connected")
 
                 # Flush buffered audio
@@ -116,6 +154,8 @@ class ASRClient:
                 # Receive loop
                 received_any = False
                 async for message in ws:
+                    if self._disconnect_requested.is_set():
+                        return
                     received_any = True
                     self._handle_message(message)
 
@@ -126,6 +166,7 @@ class ASRClient:
                 # closing, so our own closes never land here.
                 if (
                     not received_any
+                    and not self._disconnect_requested.is_set()
                     and self._ws is ws
                     and getattr(ws, "close_code", None) == 1000
                 ):
@@ -140,6 +181,8 @@ class ASRClient:
                 await ws.close()
 
         except Exception as e:
+            if self._disconnect_requested.is_set():
+                return
             if _is_connection_closed_error(e):
                 logger.warning("WebSocket closed: %s", e)
                 if self._connected:
@@ -164,6 +207,8 @@ class ASRClient:
     def send_audio(self, data: bytes) -> None:
         """Send PCM audio data. Thread-safe. Buffers if not connected."""
         with self._lock:
+            if self._disconnect_requested.is_set():
+                return
             if self._connected and self._ws:
                 if self._loop and self._loop.is_running():
                     asyncio.run_coroutine_threadsafe(
@@ -191,6 +236,8 @@ class ASRClient:
         ] if trailing_silence_ms > 0 else []
 
         with self._lock:
+            if self._disconnect_requested.is_set():
+                return
             ws = self._ws
             was_connected = self._connected
             self._connected = False
@@ -201,10 +248,10 @@ class ASRClient:
             if not was_connected:
                 self._pending_audio.extend(silence_chunks)
 
-        if was_connected and ws:
-            if self._loop and self._loop.is_running():
-                for chunk in silence_chunks:
-                    asyncio.run_coroutine_threadsafe(ws.send(chunk), self._loop)
+            if was_connected and ws:
+                if self._loop and self._loop.is_running():
+                    for chunk in silence_chunks:
+                        asyncio.run_coroutine_threadsafe(ws.send(chunk), self._loop)
 
         logger.info(
             "Finished sending audio (+%dms silence), waiting for final results",
@@ -212,14 +259,18 @@ class ASRClient:
         )
 
     def disconnect(self) -> None:
-        """Close the WebSocket."""
-        self._connected = False
+        """Cancel the connection, even if its handshake hasn't finished yet."""
         with self._lock:
+            if self._disconnect_requested.is_set():
+                return
+            self._disconnect_requested.set()
+            self._connected = False
             self._pending_audio.clear()
-        # Clear first so the receive loop can tell this close from the server's.
-        ws, self._ws = self._ws, None
-        if ws and self._loop and self._loop.is_running():
-            asyncio.run_coroutine_threadsafe(ws.close(1000, "1000-"), self._loop)
+            # Clear first so the receive loop can distinguish our close.
+            self._ws = None
+            if self._loop and not self._loop.is_closed():
+                # Queue cancellation even if the worker hasn't started its loop.
+                self._loop.call_soon_threadsafe(self._cancel_connection)
         logger.info("Disconnected")
 
     def _flush_audio_buffer(self) -> None:

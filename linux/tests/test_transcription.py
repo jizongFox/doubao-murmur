@@ -53,7 +53,7 @@ class FakeGLib:
 def recording(monkeypatch):
     glib = FakeGLib()
     monkeypatch.setattr(module, "GLib", glib)
-    monkeypatch.setattr(module, "ASRClient", Mock())
+    monkeypatch.setattr(module, "ASRClient", Mock(side_effect=lambda: Mock()))
     monkeypatch.setattr(module, "AudioCapture", Mock())
     monkeypatch.setattr(module, "ParamsStore", Mock())
     state = AppState()
@@ -74,7 +74,7 @@ def test_start_requires_login(recording):
 
     manager.on_show_login.assert_called_once_with()
     manager.audio_capture.start.assert_not_called()
-    manager.asr_client.connect.assert_not_called()
+    module.ASRClient.assert_not_called()
 
 
 @pytest.mark.parametrize("auth_failure", [False, True])
@@ -129,6 +129,106 @@ def test_cancelled_recording_ignores_late_auth_error(recording):
     manager.on_auth_expired.assert_not_called()
     assert manager.app_state.login_status == LoginStatus.LOGGED_IN
     assert manager.app_state.recording_state == RecordingState.IDLE
+
+
+@pytest.mark.parametrize("next_state", ["idle", "starting", "recording", "stopping"])
+@pytest.mark.parametrize("event, args", [
+    ("on_open", ()),
+    ("on_result", ("old recording",)),
+    ("on_finish", ()),
+    ("on_error", (RuntimeError("old network error"),)),
+    ("on_auth_error", ()),
+])
+def test_cancelled_session_ignores_callbacks(recording, next_state, event, args):
+    manager, glib = recording
+    manager.handle_start()
+    old_callback = getattr(manager.asr_client, event)
+    # Exercise both an event already queued in GTK and one emitted after reset.
+    old_callback(*args)
+    manager.handle_cancel()
+    if next_state != "idle":
+        manager.handle_start()
+        if next_state != "starting":
+            manager._on_asr_open()
+        manager.app_state.transcription_text = "new recording"
+        if next_state == "stopping":
+            manager.handle_stop()
+    expected_state = manager.app_state.recording_state
+    expected_text = manager.app_state.transcription_text
+    old_callback(*args)
+
+    glib.advance(0)
+
+    assert manager.app_state.recording_state == expected_state
+    assert manager.app_state.transcription_text == expected_text
+    assert manager.app_state.error_message is None
+    assert manager.app_state.login_status == LoginStatus.LOGGED_IN
+    module.ParamsStore.clear.assert_not_called()
+    manager.on_auth_expired.assert_not_called()
+    manager.on_paste.assert_not_called()
+
+
+def test_recording_uses_a_fresh_client_and_dispatches_current_events(recording):
+    manager, glib = recording
+    manager.handle_start()
+    old_client = manager.asr_client
+    manager.handle_cancel()
+    manager.handle_start()
+
+    assert manager.asr_client is not old_client
+    old_client.disconnect.assert_called_once_with()
+    manager.asr_client.on_open()
+    manager.asr_client.on_result("current recording")
+    glib.advance(0)
+
+    assert manager.app_state.recording_state == RecordingState.RECORDING
+    assert manager.app_state.transcription_text == "current recording"
+    manager.handle_stop()
+    manager.asr_client.on_finish()
+    glib.advance(0)
+    manager.on_paste.assert_called_once_with("current recording")
+
+
+@pytest.mark.parametrize("restart", [False, True])
+@pytest.mark.parametrize("params", [None, Mock()])
+def test_cancelled_session_ignores_parameter_extraction(recording, restart, params):
+    manager, glib = recording
+    module.ParamsStore.load.return_value = None
+    callbacks = []
+    manager.on_params_needed = callbacks.append
+    manager.handle_start()
+    old_client = manager.asr_client
+    manager.handle_cancel()
+    if restart:
+        manager.handle_start()
+    expected_state = manager.app_state.recording_state
+
+    callbacks[0](params)
+    glib.advance(int(AUTH_EXPIRY_DELAY * 1000))
+
+    assert manager.app_state.recording_state == expected_state
+    assert manager.app_state.error_message is None
+    module.ParamsStore.save.assert_not_called()
+    old_client.connect.assert_not_called()
+    if restart:
+        manager.asr_client.connect.assert_not_called()
+
+
+def test_stop_before_parameter_extraction_preserves_current_session(recording):
+    manager, _ = recording
+    module.ParamsStore.load.return_value = None
+    callbacks = []
+    manager.on_params_needed = callbacks.append
+    params = Mock()
+    manager.handle_start()
+    manager.handle_stop()
+
+    callbacks[0](params)
+
+    module.ParamsStore.save.assert_called_once_with(params)
+    manager.asr_client.connect.assert_called_once_with(params)
+    manager.asr_client.finish_sending.assert_called_once_with()
+    assert manager.app_state.recording_state == RecordingState.STOPPING
 
 
 def test_stop_waits_for_latest_result(recording):

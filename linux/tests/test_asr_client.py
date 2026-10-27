@@ -6,6 +6,7 @@ import json
 import builtins
 import threading
 from types import SimpleNamespace
+from unittest.mock import AsyncMock, Mock
 
 import pytest
 
@@ -22,7 +23,13 @@ from doubao_murmur.params_store import ASRParams
 
 @pytest.fixture
 def client():
-    return ASRClient()
+    client = ASRClient()
+    yield client
+    client.disconnect()
+    if client._thread:
+        client._thread.join(5)
+        assert not client._thread.is_alive(), "ASR worker did not shut down"
+        assert client._loop.is_closed()
 
 
 @pytest.fixture
@@ -271,6 +278,7 @@ class TestServerClose:
                 after_open()
             client._thread.join(5)
             assert not client._thread.is_alive()
+            assert client._loop.is_closed()
             return fired
 
         return run
@@ -399,6 +407,107 @@ class TestAudioBuffering:
         assert client._pending_audio[0] == b"speech"
         assert len(client._pending_audio) == 3
         assert all(len(chunk) == 3200 for chunk in client._pending_audio[1:])
+
+
+class TestConnectionLifetime:
+    @pytest.mark.parametrize("late_outcome", ["cancel", "socket", "error"])
+    def test_disconnect_cancels_pending_handshake(
+        self, client, sample_params, monkeypatch, late_outcome
+    ):
+        entered = threading.Event()
+        cancelled = threading.Event()
+        ws = SimpleNamespace(close=AsyncMock())
+        client.on_open = Mock()
+        client.on_error = Mock()
+        client.on_auth_error = Mock()
+
+        async def connect(*args, **kwargs):
+            entered.set()
+            try:
+                await asyncio.Future()
+            except asyncio.CancelledError:
+                cancelled.set()
+                # Some transports can finish just as cancellation arrives.
+                if late_outcome == "socket":
+                    return ws
+                if late_outcome == "error":
+                    raise OSError("handshake failed after cancellation")
+                raise
+
+        monkeypatch.setattr(
+            asr_client_module, "_load_websockets",
+            lambda: SimpleNamespace(connect=connect),
+        )
+        client.send_audio(b"cancelled speech")
+        client.connect(sample_params)
+        assert entered.wait(5)
+
+        client.disconnect()
+        client._thread.join(5)
+
+        assert cancelled.is_set()
+        assert not client._thread.is_alive()
+        assert client._loop.is_closed()
+        assert not client.is_connected
+        assert client._pending_audio == []
+        client.on_open.assert_not_called()
+        client.on_error.assert_not_called()
+        client.on_auth_error.assert_not_called()
+        if late_outcome == "socket":
+            ws.close.assert_awaited_once_with()
+
+    def test_disconnect_before_worker_starts(self, client, sample_params, monkeypatch):
+        release = threading.Event()
+        run_loop = client._run_loop
+        connect = AsyncMock()
+
+        def delayed_run(params):
+            assert release.wait(5)
+            run_loop(params)
+
+        monkeypatch.setattr(client, "_run_loop", delayed_run)
+        monkeypatch.setattr(
+            asr_client_module, "_load_websockets",
+            lambda: SimpleNamespace(connect=connect),
+        )
+        client.connect(sample_params)
+        try:
+            client.disconnect()
+        finally:
+            release.set()
+        client._thread.join(5)
+
+        connect.assert_not_called()
+        assert not client._thread.is_alive()
+        assert client._loop.is_closed()
+
+    def test_disconnect_before_connect_discards_late_audio(self, client, sample_params):
+        client.send_audio(b"cancelled speech")
+        client.disconnect()
+
+        client.send_audio(b"late microphone callback")
+        client.finish_sending()
+        client.connect(sample_params)
+        client.disconnect()
+
+        assert client._pending_audio == []
+        assert client._thread is None
+
+    def test_connection_failure_closes_loop(self, client, sample_params, monkeypatch):
+        error = OSError("network unavailable")
+        connect = AsyncMock(side_effect=error)
+        client.on_error = Mock()
+        monkeypatch.setattr(
+            asr_client_module, "_load_websockets",
+            lambda: SimpleNamespace(connect=connect),
+        )
+
+        client.connect(sample_params)
+        client._thread.join(5)
+
+        client.on_error.assert_called_once_with(error)
+        assert not client._thread.is_alive()
+        assert client._loop.is_closed()
 
 
 class TestDependencyHandling:
