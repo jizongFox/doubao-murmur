@@ -33,13 +33,8 @@ try:
 
     _HAS_WEBKIT = True
 except (ImportError, ValueError):
-    try:
-        gi.require_version("WebKit2", "4.1")
-        from gi.repository import WebKit2 as WebKit
-
-        _HAS_WEBKIT = True
-    except (ImportError, ValueError):
-        pass
+    # WebKit2 4.1 uses GTK3 and cannot be embedded in this GTK4 application.
+    pass
 
 
 def _as_id(value) -> str:

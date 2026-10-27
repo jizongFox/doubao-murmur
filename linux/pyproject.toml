@@ -1,6 +1,6 @@
 [build-system]
-requires = ["setuptools>=68.0", "wheel"]
-build-backend = "setuptools.backends._legacy:_Backend"
+requires = ["setuptools>=77.0", "wheel", "packaging>=24.2"]
+build-backend = "setuptools.build_meta"
 
 [project]
 name = "doubao-murmur"
@@ -8,15 +8,16 @@ version = "1.5.1"
 description = "Voice-to-text input using Doubao ASR for SteamOS/Linux"
 readme = "README.md"
 license = "MIT"
-requires-python = ">=3.11"
+requires-python = ">=3.10"
 authors = [
     { name = "lilong7676" },
 ]
 
 dependencies = [
-    "PyGObject>=3.48",
+    "PyGObject>=3.42",
     "websockets>=12.0",
     "sounddevice>=0.4.6",
+    "python-xlib>=0.31",
 ]
 
 [project.optional-dependencies]

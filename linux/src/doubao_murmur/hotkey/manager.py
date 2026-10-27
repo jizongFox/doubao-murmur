@@ -16,6 +16,8 @@ import time
 
 from gi.repository import GLib
 
+from doubao_murmur.desktop import is_x11_session
+
 from doubao_murmur.config import (
     DEBOUNCE_INTERVAL,
     RECORDING_MODES,
@@ -58,6 +60,10 @@ class HotkeyManager:
                 logger.warning("X11 key listener failed to start")
                 self._x11_listener = None
 
+        # XRecord covers the whole X11 desktop; raw device access adds duplicate
+        # events there. Wayland still needs evdev alongside XWayland's XRecord.
+        if is_x11_session() and self._x11_listener is not None:
+            self._evdev_listener = None
         if self._evdev_listener:
             if self._evdev_listener.start():
                 logger.info("evdev listener active")

@@ -3,6 +3,7 @@
 import importlib
 import sys
 import types
+from unittest.mock import Mock
 
 import pytest
 
@@ -47,6 +48,29 @@ def _wire(manager):
     manager.on_stop = lambda: events.append("stop")
     manager.on_cancel = lambda: events.append("cancel")
     return events
+
+
+@pytest.mark.parametrize("x11_session,xrecord_started,use_evdev", [
+    (True, True, False),
+    (True, False, True),
+    (False, True, True),
+    (False, False, True),
+])
+def test_backend_selection(manager_module, monkeypatch, x11_session,
+                           xrecord_started, use_evdev):
+    module, _ = manager_module
+    monkeypatch.setattr(module, "is_x11_session", lambda: x11_session)
+    x11 = Mock()
+    x11.start.return_value = xrecord_started
+    evdev = Mock()
+    manager = module.HotkeyManager()
+
+    manager.start(x11_listener=x11, evdev_listener=evdev)
+    manager.stop()
+
+    assert evdev.start.called is use_evdev
+    assert evdev.stop.called is use_evdev
+    assert x11.stop.called is xrecord_started
 
 
 def test_toggle_mode_acts_on_valid_release(manager_module):
