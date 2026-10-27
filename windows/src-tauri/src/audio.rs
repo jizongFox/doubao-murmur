@@ -202,3 +202,33 @@ impl<F: Fn(Vec<u8>)> Pump<F> {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn capture_drop_flushes_partial_chunk_before_closing_audio_channel() {
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        let mut pump = Pump::new(config::AUDIO_SAMPLE_RATE, 1, move |bytes| {
+            tx.send(bytes).unwrap();
+        });
+        pump.push_f32(&vec![0.5; config::audio_chunk_samples() + 7]);
+        let full = rx.try_recv().unwrap();
+        assert_eq!(full.len(), config::audio_chunk_samples() * 2);
+        drop(pump);
+        let tail = rx.try_recv().expect("partial capture chunk must survive shutdown");
+        assert_eq!(tail.len(), 7 * 2);
+        assert!(tail.iter().any(|&byte| byte != 0));
+        assert_eq!(rx.try_recv(), Err(tokio::sync::mpsc::error::TryRecvError::Disconnected));
+    }
+
+    #[test]
+    fn empty_capture_does_not_emit_an_empty_chunk() {
+        let chunks = std::sync::Mutex::new(Vec::new());
+        drop(Pump::new(config::AUDIO_SAMPLE_RATE, 1, |bytes| {
+            chunks.lock().unwrap().push(bytes);
+        }));
+        assert!(chunks.into_inner().unwrap().is_empty());
+    }
+}

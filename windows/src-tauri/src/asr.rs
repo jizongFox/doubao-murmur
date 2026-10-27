@@ -132,8 +132,8 @@ fn percent_encode(value: &str) -> String {
 
 async fn run<F: Fn(AsrEvent)>(
     params: AsrParams,
-    mut audio_rx: UnboundedReceiver<Vec<u8>>,
-    mut ctl_rx: UnboundedReceiver<Ctl>,
+    audio_rx: UnboundedReceiver<Vec<u8>>,
+    ctl_rx: UnboundedReceiver<Ctl>,
     emit: F,
 ) {
     let url = build_url(&params, &uuid::Uuid::new_v4().to_string());
@@ -147,6 +147,17 @@ async fn run<F: Fn(AsrEvent)>(
         }
     };
 
+    run_request(request, audio_rx, ctl_rx, emit).await;
+}
+
+// Keep the production handshake and streaming loop together so local WebSocket
+// tests exercise the same buffering and stop ordering as a real connection.
+async fn run_request<F: Fn(AsrEvent)>(
+    request: tokio_tungstenite::tungstenite::handshake::client::Request,
+    mut audio_rx: UnboundedReceiver<Vec<u8>>,
+    mut ctl_rx: UnboundedReceiver<Ctl>,
+    emit: F,
+) {
     log_info!("Connecting to ASR WebSocket");
     let socket = match tokio::time::timeout(
         config::CONNECT_TIMEOUT,
@@ -369,6 +380,109 @@ mod tests {
         params.device_id = "1234567890".into();
         params.web_id = "9876543210".into();
         params
+    }
+
+    async fn local_request() -> (
+        tokio::net::TcpListener,
+        tokio_tungstenite::tungstenite::handshake::client::Request,
+    ) {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("ws://{}", listener.local_addr().unwrap());
+        let request = make_request(&url, &sample_params()).unwrap();
+        (listener, request)
+    }
+
+    async fn expect_audio_then_results(
+        listener: tokio::net::TcpListener,
+        speech: Vec<Vec<u8>>,
+        first_chunk: Option<tokio::sync::oneshot::Sender<()>>,
+    ) {
+        let (tcp, _) = listener.accept().await.unwrap();
+        let mut socket = tokio_tungstenite::accept_async(tcp).await.unwrap();
+        let mut first_chunk = first_chunk;
+        let silence = vec![0; config::audio_chunk_samples() * 2];
+        let expected = speech.into_iter().chain(
+            std::iter::repeat(silence).take(config::stop_trailing_silence_chunks()),
+        );
+        for bytes in expected {
+            assert_eq!(socket.next().await.unwrap().unwrap(), Message::Binary(bytes));
+            if let Some(tx) = first_chunk.take() {
+                tx.send(()).unwrap();
+            }
+        }
+        socket.send(Message::Text(
+            r#"{"event":"result","result":{"Text":"完整句子"}}"#.into(),
+        )).await.unwrap();
+        socket.send(Message::Text(r#"{"event":"finish"}"#.into())).await.unwrap();
+        socket.close(None).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn stop_before_connect_drains_backlog_before_silence_and_results() {
+        let (listener, request) = local_request().await;
+        let (audio_tx, audio_rx) = unbounded_channel();
+        let (ctl_tx, ctl_rx) = unbounded_channel();
+        let speech = vec![vec![1, 2], vec![3, 4], vec![5, 6]];
+        for chunk in &speech {
+            audio_tx.send(chunk.clone()).unwrap();
+        }
+        // Capture has fully stopped before even starting the handshake.
+        drop(audio_tx);
+        let events = std::sync::Mutex::new(Vec::new());
+        tokio::time::timeout(std::time::Duration::from_secs(3), async {
+            tokio::join!(
+                run_request(request, audio_rx, ctl_rx, |e| events.lock().unwrap().push(e)),
+                expect_audio_then_results(listener, speech, None),
+            );
+        }).await.expect("stop must flush queued speech and silence");
+        drop(ctl_tx);
+        let events = events.into_inner().unwrap();
+        assert!(events.contains(&AsrEvent::Result("完整句子".into())));
+        assert!(events.contains(&AsrEvent::Finished));
+    }
+
+    #[tokio::test]
+    async fn capture_shutdown_waits_for_last_callback_before_silence() {
+        let (listener, request) = local_request().await;
+        let (audio_tx, audio_rx) = unbounded_channel();
+        let (ctl_tx, ctl_rx) = unbounded_channel();
+        let (first_tx, first_rx) = tokio::sync::oneshot::channel();
+        audio_tx.send(vec![1, 2]).unwrap();
+        tokio::time::timeout(std::time::Duration::from_secs(3), async {
+            tokio::join!(
+                run_request(request, audio_rx, ctl_rx, |_| {}),
+                expect_audio_then_results(listener, vec![vec![1, 2], vec![3, 4]], Some(first_tx)),
+                async move {
+                    // An empty queue is not EOF: the final callback is still alive.
+                    first_rx.await.unwrap();
+                    audio_tx.send(vec![3, 4]).unwrap();
+                    drop(audio_tx);
+                },
+            );
+        }).await.expect("final capture callback must precede silence");
+        drop(ctl_tx);
+    }
+
+    #[tokio::test]
+    async fn cancellation_discards_queued_speech_without_silence() {
+        let (listener, request) = local_request().await;
+        let (audio_tx, audio_rx) = unbounded_channel();
+        let (ctl_tx, ctl_rx) = unbounded_channel();
+        audio_tx.send(vec![1, 2]).unwrap();
+        drop(audio_tx);
+        ctl_tx.send(Ctl::Disconnect).unwrap();
+        let events = std::sync::Mutex::new(Vec::new());
+        tokio::time::timeout(std::time::Duration::from_secs(3), async {
+            tokio::join!(
+                run_request(request, audio_rx, ctl_rx, |e| events.lock().unwrap().push(e)),
+                async {
+                    let (tcp, _) = listener.accept().await.unwrap();
+                    let mut socket = tokio_tungstenite::accept_async(tcp).await.unwrap();
+                    assert!(matches!(socket.next().await, Some(Ok(Message::Close(_)))));
+                },
+            );
+        }).await.expect("cancellation must not drain audio");
+        assert_eq!(*events.lock().unwrap(), vec![AsrEvent::Opened]);
     }
 
     fn query_of(url: &str) -> HashMap<String, String> {
