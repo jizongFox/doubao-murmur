@@ -29,7 +29,11 @@ logger = logging.getLogger(__name__)
 
 
 class HotkeyManager:
-    """Coordinates input methods for triggering recording."""
+    """Own hotkey decisions on GTK; backends only enqueue timestamped input.
+
+    start/stop and settings setters must run on the GTK thread. The trigger_*
+    entrypoints may run on either backend thread and never mutate hotkey state.
+    """
 
     def __init__(self, recording_mode: str = RECORDING_MODE_TOGGLE) -> None:
         if recording_mode not in RECORDING_MODES:
@@ -47,9 +51,11 @@ class HotkeyManager:
         self._recording_mode = recording_mode
         self._hold_active = False
         self._last_hold_release_time = 0.0
+        self._input_epoch: object | None = object()
 
     def start(self, evdev_listener=None, x11_listener=None) -> None:
         """Initialize input backends."""
+        self._input_epoch = object()
         self._evdev_listener = evdev_listener
         self._x11_listener = x11_listener
 
@@ -73,10 +79,14 @@ class HotkeyManager:
 
     def stop(self) -> None:
         """Stop all input backends."""
+        self._input_epoch = None
+        self._hold_active = False
         if self._x11_listener:
             self._x11_listener.stop()
         if self._evdev_listener:
             self._evdev_listener.stop()
+        self._x11_listener = None
+        self._evdev_listener = None
 
     @property
     def has_global_hotkey(self) -> bool:
@@ -87,22 +97,44 @@ class HotkeyManager:
         )
 
     def trigger_toggle(self) -> None:
-        """Called by input backends, possibly from non-GTK threads.
+        self._queue_input(self._handle_toggle)
 
-        Debounced, then marshalled to the GTK main thread — GTK4 is not
-        thread-safe and the evdev listener runs on its own thread.
-        """
-        now = time.monotonic()
+    def trigger_record_press(self) -> None:
+        self._queue_input(self._handle_record_press)
+
+    def trigger_record_release(self, valid: bool) -> None:
+        """Queue release; ``valid`` is false when AltGr formed a chord."""
+        self._queue_input(self._handle_record_release, valid)
+
+    def trigger_cancel(self) -> None:
+        self._queue_input(self._handle_cancel)
+
+    def trigger_keyboard(self) -> None:
+        self._queue_input(self._handle_keyboard)
+
+    def _queue_input(self, handler, *args) -> None:
+        # Snapshot event time, not dispatch time: a busy GTK loop must not make
+        # two separate key presses look like simultaneous duplicates.
+        epoch = self._input_epoch
+        if epoch is not None:
+            GLib.idle_add(self._dispatch_input, epoch, handler, time.monotonic(), *args)
+
+    def _dispatch_input(self, epoch, handler, timestamp, *args) -> bool:
+        # Shutdown and mode changes invalidate work queued under the old rules.
+        if epoch is self._input_epoch:
+            handler(timestamp, *args)
+        return GLib.SOURCE_REMOVE
+
+    def _handle_toggle(self, now: float) -> None:
         if now - self._last_toggle_time < DEBOUNCE_INTERVAL:
             return
         self._last_toggle_time = now
-        GLib.idle_add(self._dispatch_toggle)
+        if self.on_toggle:
+            self.on_toggle()
 
-    def trigger_record_press(self) -> None:
-        """Handle the first press of the recording hotkey."""
+    def _handle_record_press(self, now: float) -> None:
         if self._recording_mode != RECORDING_MODE_HOLD:
             return
-        now = time.monotonic()
         if self._hold_active:
             return
         # X11 and evdev can report the same physical key. A second backend may
@@ -110,68 +142,40 @@ class HotkeyManager:
         if now - self._last_hold_release_time < DEBOUNCE_INTERVAL:
             return
         self._hold_active = True
-        GLib.idle_add(self._dispatch_start)
+        if self.on_start:
+            self.on_start()
 
-    def trigger_record_release(self, valid: bool) -> None:
-        """Handle release; ``valid`` is false when AltGr formed a chord."""
+    def _handle_record_release(self, now: float, valid: bool) -> None:
         if self._recording_mode == RECORDING_MODE_TOGGLE:
             if valid:
-                self.trigger_toggle()
+                self._handle_toggle(now)
             return
         if not self._hold_active:
             return
         self._hold_active = False
-        self._last_hold_release_time = time.monotonic()
+        self._last_hold_release_time = now
         if valid:
-            GLib.idle_add(self._dispatch_stop)
+            if self.on_stop:
+                self.on_stop()
         else:
-            GLib.idle_add(self._dispatch_cancel)
+            if self.on_cancel:
+                self.on_cancel()
 
-    def trigger_cancel(self) -> None:
-        """Called by input backends for cancel (ESC)."""
+    def _handle_cancel(self, now: float) -> None:
         if self._hold_active:
             self._hold_active = False
-            self._last_hold_release_time = time.monotonic()
-            GLib.idle_add(self._dispatch_cancel)
+            self._last_hold_release_time = now
+        elif not self._cancel_enabled:
             return
-        if self._cancel_enabled:
-            GLib.idle_add(self._dispatch_cancel)
+        if self.on_cancel:
+            self.on_cancel()
 
-    def trigger_keyboard(self) -> None:
-        """Called by input backends for the on-screen-keyboard hotkey.
-
-        Debounced so key auto-repeat (holding the chord) toggles once.
-        """
-        now = time.monotonic()
+    def _handle_keyboard(self, now: float) -> None:
         if now - self._last_keyboard_time < DEBOUNCE_INTERVAL:
             return
         self._last_keyboard_time = now
-        GLib.idle_add(self._dispatch_keyboard)
-
-    def _dispatch_keyboard(self) -> bool:
         if self.on_keyboard:
             self.on_keyboard()
-        return GLib.SOURCE_REMOVE
-
-    def _dispatch_toggle(self) -> bool:
-        if self.on_toggle:
-            self.on_toggle()
-        return GLib.SOURCE_REMOVE
-
-    def _dispatch_start(self) -> bool:
-        if self.on_start:
-            self.on_start()
-        return GLib.SOURCE_REMOVE
-
-    def _dispatch_stop(self) -> bool:
-        if self.on_stop:
-            self.on_stop()
-        return GLib.SOURCE_REMOVE
-
-    def _dispatch_cancel(self) -> bool:
-        if self.on_cancel:
-            self.on_cancel()
-        return GLib.SOURCE_REMOVE
 
     def set_cancel_enabled(self, enabled: bool) -> None:
         self._cancel_enabled = enabled
@@ -180,8 +184,13 @@ class HotkeyManager:
         """Apply a mode change immediately, cancelling an active hold."""
         if mode not in RECORDING_MODES:
             raise ValueError(f"Unknown recording mode: {mode}")
+        if mode == self._recording_mode:
+            return
+        if self._input_epoch is not None:
+            self._input_epoch = object()
+        self._recording_mode = mode
         if self._hold_active:
             self._hold_active = False
             self._last_hold_release_time = time.monotonic()
-            GLib.idle_add(self._dispatch_cancel)
-        self._recording_mode = mode
+            if self.on_cancel:
+                self.on_cancel()

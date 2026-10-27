@@ -3,11 +3,12 @@
 import importlib
 import sys
 import types
+import threading
 from unittest.mock import Mock
 
 import pytest
 
-from doubao_murmur.config import RECORDING_MODE_HOLD
+from doubao_murmur.config import RECORDING_MODE_HOLD, RECORDING_MODE_TOGGLE
 
 
 class FakeGLib:
@@ -143,3 +144,163 @@ def test_escape_cancels_even_before_start_is_dispatched(
     glib.drain()
 
     assert events == ["start", "cancel"]
+
+
+def test_worker_input_does_not_change_state_until_gtk_dispatch(manager_module):
+    module, glib = manager_module
+    manager = module.HotkeyManager(RECORDING_MODE_HOLD)
+    main_thread = threading.get_ident()
+    callback_threads = []
+    manager.on_start = lambda: callback_threads.append(threading.get_ident())
+    worker = threading.Thread(target=manager.trigger_record_press)
+    worker.start()
+    worker.join(5)
+    assert not worker.is_alive()
+    assert not manager._hold_active
+    assert callback_threads == []
+
+    glib.drain()
+
+    assert manager._hold_active
+    assert callback_threads == [main_thread]
+
+
+def test_concurrent_backend_presses_start_once(manager_module):
+    module, glib = manager_module
+    manager = module.HotkeyManager(RECORDING_MODE_HOLD)
+    events = _wire(manager)
+    barrier = threading.Barrier(3)
+
+    def press():
+        barrier.wait(timeout=5)
+        manager.trigger_record_press()
+
+    workers = [threading.Thread(target=press) for _ in range(2)]
+    for worker in workers:
+        worker.start()
+    barrier.wait(timeout=5)
+    for worker in workers:
+        worker.join(5)
+        assert not worker.is_alive()
+    glib.drain()
+    manager.trigger_record_release(True)
+    manager.trigger_record_release(True)
+    glib.drain()
+
+    assert events == ["start", "stop"]
+
+
+@pytest.mark.parametrize("trigger, event", [
+    ("trigger_toggle", "toggle"), ("trigger_keyboard", "keyboard"),
+])
+def test_debounce_uses_arrival_time_not_dispatch_time(
+    manager_module, monkeypatch, trigger, event
+):
+    module, glib = manager_module
+    now = [1.0]
+    monkeypatch.setattr(module.time, "monotonic", lambda: now[0])
+    manager = module.HotkeyManager()
+    events = _wire(manager)
+    manager.on_keyboard = lambda: events.append("keyboard")
+    send = getattr(manager, trigger)
+    send()
+    now[0] = 1.01
+    send()  # auto-repeat / second backend
+    now[0] = 2.0
+    send()  # genuinely separate press, queued while GTK was busy
+    now[0] = 10.0
+    glib.drain()
+
+    assert events == [event, event]
+
+
+def test_hold_debounce_uses_release_arrival_time(manager_module, monkeypatch):
+    module, glib = manager_module
+    now = [1.0]
+    monkeypatch.setattr(module.time, "monotonic", lambda: now[0])
+    manager = module.HotkeyManager(RECORDING_MODE_HOLD)
+    events = _wire(manager)
+    manager.trigger_record_press()
+    manager.trigger_record_release(True)
+    now[0] = 1.1
+    manager.trigger_record_press()
+    manager.trigger_record_release(True)
+    now[0] = 2.0
+    manager.trigger_record_press()
+    manager.trigger_record_release(True)
+    glib.drain()
+
+    assert events == ["start", "stop", "start", "stop"]
+
+
+@pytest.mark.parametrize("active", [False, True])
+def test_mode_change_discards_pending_old_mode_input(manager_module, active):
+    module, glib = manager_module
+    manager = module.HotkeyManager(RECORDING_MODE_HOLD)
+    events = _wire(manager)
+    manager.trigger_record_press()
+    if active:
+        glib.drain()
+    manager.trigger_record_release(True)
+
+    manager.set_recording_mode(RECORDING_MODE_TOGGLE)
+    glib.drain()
+
+    assert events == (["start", "cancel"] if active else [])
+    manager.trigger_record_release(True)
+    glib.drain()
+    assert events[-1] == "toggle"
+
+
+def test_same_mode_keeps_pending_input_and_invalid_mode_raises(manager_module):
+    module, glib = manager_module
+    manager = module.HotkeyManager(RECORDING_MODE_HOLD)
+    events = _wire(manager)
+    manager.trigger_record_press()
+    with pytest.raises(ValueError):
+        manager.set_recording_mode("unknown")
+    manager.set_recording_mode(RECORDING_MODE_HOLD)
+    glib.drain()
+    assert events == ["start"]
+
+
+def test_cancel_enabled_is_checked_in_gtk_event_order(manager_module):
+    module, glib = manager_module
+    manager = module.HotkeyManager()
+    events = _wire(manager)
+
+    def start():
+        events.append("toggle")
+        manager.set_cancel_enabled(True)
+
+    manager.on_toggle = start
+    manager.trigger_record_release(True)
+    manager.trigger_cancel()
+    glib.drain()
+
+    assert events == ["toggle", "cancel"]
+
+
+def test_stop_discards_queued_and_late_input_even_after_restart(manager_module):
+    module, glib = manager_module
+    manager = module.HotkeyManager(RECORDING_MODE_HOLD)
+    events = _wire(manager)
+    manager.on_keyboard = lambda: events.append("keyboard")
+    manager.set_cancel_enabled(True)
+    for _ in range(2):
+        manager.trigger_record_press()
+        manager.trigger_record_release(True)
+        manager.trigger_cancel()
+        manager.trigger_toggle()
+        manager.trigger_keyboard()
+        manager.stop()
+    manager.set_recording_mode(RECORDING_MODE_TOGGLE)
+    manager.trigger_toggle()
+    manager.set_recording_mode(RECORDING_MODE_HOLD)
+    manager.start()
+    glib.drain()
+    assert events == []
+    assert not manager.has_global_hotkey
+    manager.trigger_record_press()
+    glib.drain()
+    assert events == ["start"]
