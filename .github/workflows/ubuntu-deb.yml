@@ -44,7 +44,9 @@ jobs:
         env:
           PYTHONPATH: /usr/lib/doubao-murmur
         run: |
-          python3 -c 'from doubao_murmur.app import DoubaoMurmurApp; import sounddevice, websockets, Xlib'
+          # Importing sounddevice initializes PortAudio, which requires an
+          # audio server on Ubuntu 26.04. Check its presence without opening it.
+          python3 -c 'from importlib.util import find_spec; from doubao_murmur.app import DoubaoMurmurApp; import websockets, Xlib; assert find_spec("sounddevice") is not None'
           python3 -m pytest linux/tests/ -q
       - name: Isolated UI startup smoke test
         # No credentials, audio devices or remote pages. Only this isolated
