@@ -55,6 +55,8 @@ class TranscriptionManager:
         self.safety_timer_id: int | None = None
         # Pending completion, rescheduled on each late result so only the last wins.
         self.quiet_timer_id: int | None = None
+        self.error_timer_id: int | None = None
+        self.clear_text_timer_id: int | None = None
 
         # Callbacks set by app.py
         self.on_auth_expired = None  # () -> None
@@ -114,6 +116,7 @@ class TranscriptionManager:
             return
 
         logger.info("Starting recording...")
+        self._cancel_pending_timers()
         self._set_state(RecordingState.STARTING)
         self.app_state.transcription_text = ""
         self.app_state.error_message = None
@@ -126,9 +129,7 @@ class TranscriptionManager:
         except Exception as e:
             logger.error("Audio capture failed: %s", e)
             self.app_state.error_message = "麦克风启动失败"
-            GLib.timeout_add(
-                int(AUTH_EXPIRY_DELAY * 1000), self._reset_to_idle
-            )
+            self._schedule_error_reset()
             return
 
         # Try cached params first, fall back to WebView extraction
@@ -142,9 +143,7 @@ class TranscriptionManager:
             self.on_params_needed(self._on_params_extracted)
         else:
             self.app_state.error_message = "无法获取连接参数，请重新登录"
-            GLib.timeout_add(
-                int(AUTH_EXPIRY_DELAY * 1000), self._reset_to_idle
-            )
+            self._schedule_error_reset()
 
     def _stop_recording(self) -> None:
         logger.info("Stopping recording...")
@@ -232,7 +231,7 @@ class TranscriptionManager:
             self._handle_auth_failure()
             return GLib.SOURCE_REMOVE
         self.app_state.error_message = "连接出错"
-        GLib.timeout_add(int(AUTH_EXPIRY_DELAY * 1000), self._reset_to_idle)
+        self._schedule_error_reset()
         return GLib.SOURCE_REMOVE
 
     def _on_auth_error(self) -> bool:
@@ -241,9 +240,31 @@ class TranscriptionManager:
 
     # --- Completion & Reset ---
 
-    def _cancel_stop_timers(self) -> None:
-        """Drop any pending stop-phase timers so they cannot fire after reset."""
-        for attr in ("quiet_timer_id", "safety_timer_id"):
+    def _schedule_error_reset(self) -> None:
+        """Keep one delayed error reset, owned by the current recording."""
+        if self.error_timer_id is not None:
+            GLib.source_remove(self.error_timer_id)
+        self.error_timer_id = GLib.timeout_add(
+            int(AUTH_EXPIRY_DELAY * 1000), self._on_error_timeout
+        )
+
+    def _on_error_timeout(self) -> bool:
+        self.error_timer_id = None
+        return self._reset_to_idle()
+
+    def _clear_transcription_text(self) -> bool:
+        self.clear_text_timer_id = None
+        self.app_state.transcription_text = ""
+        return GLib.SOURCE_REMOVE
+
+    def _cancel_pending_timers(self) -> None:
+        """Prevent delayed work from surviving reset or entering a new recording."""
+        for attr in (
+            "quiet_timer_id",
+            "safety_timer_id",
+            "error_timer_id",
+            "clear_text_timer_id",
+        ):
             timer_id = getattr(self, attr)
             if timer_id is not None:
                 GLib.source_remove(timer_id)
@@ -258,7 +279,7 @@ class TranscriptionManager:
 
     def _reset_to_idle(self) -> bool:
         self.awaiting_final_result = False
-        self._cancel_stop_timers()
+        self._cancel_pending_timers()
         self.audio_capture.stop()
         self.asr_client.disconnect()
         self._set_state(RecordingState.IDLE)
@@ -267,9 +288,8 @@ class TranscriptionManager:
             self.on_overlay_hide()
         self.using_cached_params = False
         # Clear text after short delay
-        GLib.timeout_add(
-            200, lambda: setattr(self.app_state, "transcription_text", "")
-            or GLib.SOURCE_REMOVE
+        self.clear_text_timer_id = GLib.timeout_add(
+            200, self._clear_transcription_text
         )
         return GLib.SOURCE_REMOVE
 
@@ -277,17 +297,11 @@ class TranscriptionManager:
         if self.app_state.recording_state == RecordingState.IDLE:
             return
         logger.info("Cancelling transcription")
-        self.awaiting_final_result = False
-        self.audio_capture.stop()
-        self.asr_client.disconnect()
         self._reset_to_idle()
 
     def _handle_auth_failure(self) -> None:
         logger.warning("Auth failure, clearing cached params")
         ParamsStore.clear()
-        self.using_cached_params = False
-        self.audio_capture.stop()
-        self.asr_client.disconnect()
         self._reset_to_idle()
         self.app_state.login_status = LoginStatus.NOT_LOGGED_IN
         if self.on_auth_expired:
@@ -305,6 +319,4 @@ class TranscriptionManager:
             self.asr_client.connect(params)
         else:
             self.app_state.error_message = "无法获取连接参数，请重新登录"
-            GLib.timeout_add(
-                int(AUTH_EXPIRY_DELAY * 1000), self._reset_to_idle
-            )
+            self._schedule_error_reset()

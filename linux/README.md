@@ -210,7 +210,6 @@ linux/
 │   ├── params_store.py      # 凭证持久化
 │   ├── hotkey/              # 输入管理
 │   │   ├── manager.py       # 热键管理器（统一封送到 GTK 主线程）
-│   │   ├── overlay_button.py # 屏幕 PTT 按钮
 │   │   ├── x11_listener.py  # X11/XRecord 全局键监听（主用）
 │   │   └── evdev_listener.py # /dev/input 监听（非 X11 后备）
 │   ├── ui/                  # 用户界面
