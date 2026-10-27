@@ -19,6 +19,8 @@ use crate::{log_error, log_info, log_warn};
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum AsrEvent {
     Opened,
+    /// All captured speech and trailing silence have been sent.
+    AudioDrained,
     Result(String),
     Finished,
     /// Network/protocol failure; must not invalidate saved credentials.
@@ -28,7 +30,6 @@ pub enum AsrEvent {
 }
 
 enum Ctl {
-    Finish,
     Disconnect,
 }
 
@@ -44,12 +45,8 @@ impl AsrClient {
     /// `audio_rx` is created by the caller before recording starts, so chunks
     /// captured while the handshake is in flight are already queued when the
     /// socket opens.
-    pub fn connect<F>(
-        &mut self,
-        params: AsrParams,
-        audio_rx: UnboundedReceiver<Vec<u8>>,
-        emit: F,
-    ) where
+    pub fn connect<F>(&mut self, params: AsrParams, audio_rx: UnboundedReceiver<Vec<u8>>, emit: F)
+    where
         F: Fn(AsrEvent) + Send + 'static,
     {
         self.disconnect();
@@ -70,14 +67,6 @@ impl AsrClient {
             };
             runtime.block_on(run(params, audio_rx, ctl_rx, emit));
         });
-    }
-
-    /// Stop sending audio but keep the socket open for the final result.
-    pub fn finish_sending(&self) {
-        if let Some(tx) = &self.ctl_tx {
-            let _ = tx.send(Ctl::Finish);
-        }
-        log_info!("Finished sending audio, waiting for server response");
     }
 
     pub fn disconnect(&mut self) {
@@ -191,19 +180,6 @@ async fn run_request<F: Fn(AsrEvent)>(
             biased;
 
             ctl = ctl_rx.recv() => match ctl {
-                Some(Ctl::Finish) => {
-                    // Flush trailing silence so the server finalises the last
-                    // word before we stop feeding it audio; see
-                    // config::STOP_TRAILING_SILENCE_MS.
-                    let silence = vec![0u8; config::audio_chunk_samples() * 2];
-                    for _ in 0..config::stop_trailing_silence_chunks() {
-                        if let Err(e) = write.send(Message::Binary(silence.clone())).await {
-                            log_warn!("Silence padding send failed: {e}");
-                            break;
-                        }
-                    }
-                    sending = false;
-                }
                 Some(Ctl::Disconnect) | None => {
                     report_close_error = false;
                     break;
@@ -217,7 +193,22 @@ async fn run_request<F: Fn(AsrEvent)>(
                         break;
                     }
                 }
-                None => sending = false,
+                None => {
+                    // EOF arrives only after the capture callback (including its
+                    // partial final chunk) is dropped and every queued chunk is
+                    // read. A stop command on a separate channel can overtake both.
+                    let silence = vec![0u8; config::audio_chunk_samples() * 2];
+                    for _ in 0..config::stop_trailing_silence_chunks() {
+                        if let Err(e) = write.send(Message::Binary(silence.clone())).await {
+                            log_warn!("Silence padding send failed: {e}");
+                            emit(AsrEvent::Error(e.to_string()));
+                            return;
+                        }
+                    }
+                    sending = false;
+                    emit(AsrEvent::AudioDrained);
+                    log_info!("Finished sending audio, waiting for server response");
+                }
             },
 
             incoming = read.next() => match incoming {
@@ -401,19 +392,28 @@ mod tests {
         let mut socket = tokio_tungstenite::accept_async(tcp).await.unwrap();
         let mut first_chunk = first_chunk;
         let silence = vec![0; config::audio_chunk_samples() * 2];
-        let expected = speech.into_iter().chain(
-            std::iter::repeat(silence).take(config::stop_trailing_silence_chunks()),
-        );
+        let expected = speech
+            .into_iter()
+            .chain(std::iter::repeat(silence).take(config::stop_trailing_silence_chunks()));
         for bytes in expected {
-            assert_eq!(socket.next().await.unwrap().unwrap(), Message::Binary(bytes));
+            assert_eq!(
+                socket.next().await.unwrap().unwrap(),
+                Message::Binary(bytes)
+            );
             if let Some(tx) = first_chunk.take() {
                 tx.send(()).unwrap();
             }
         }
-        socket.send(Message::Text(
-            r#"{"event":"result","result":{"Text":"完整句子"}}"#.into(),
-        )).await.unwrap();
-        socket.send(Message::Text(r#"{"event":"finish"}"#.into())).await.unwrap();
+        socket
+            .send(Message::Text(
+                r#"{"event":"result","result":{"Text":"完整句子"}}"#.into(),
+            ))
+            .await
+            .unwrap();
+        socket
+            .send(Message::Text(r#"{"event":"finish"}"#.into()))
+            .await
+            .unwrap();
         socket.close(None).await.unwrap();
     }
 
@@ -431,12 +431,28 @@ mod tests {
         let events = std::sync::Mutex::new(Vec::new());
         tokio::time::timeout(std::time::Duration::from_secs(3), async {
             tokio::join!(
-                run_request(request, audio_rx, ctl_rx, |e| events.lock().unwrap().push(e)),
+                run_request(request, audio_rx, ctl_rx, |e| events
+                    .lock()
+                    .unwrap()
+                    .push(e)),
                 expect_audio_then_results(listener, speech, None),
             );
-        }).await.expect("stop must flush queued speech and silence");
+        })
+        .await
+        .expect("stop must flush queued speech and silence");
         drop(ctl_tx);
         let events = events.into_inner().unwrap();
+        assert_eq!(
+            events
+                .iter()
+                .filter(|e| **e == AsrEvent::AudioDrained)
+                .count(),
+            1
+        );
+        assert!(
+            events.iter().position(|e| *e == AsrEvent::AudioDrained)
+                < events.iter().position(|e| matches!(e, AsrEvent::Result(_)))
+        );
         assert!(events.contains(&AsrEvent::Result("完整句子".into())));
         assert!(events.contains(&AsrEvent::Finished));
     }
@@ -459,7 +475,43 @@ mod tests {
                     drop(audio_tx);
                 },
             );
-        }).await.expect("final capture callback must precede silence");
+        })
+        .await
+        .expect("final capture callback must precede silence");
+        drop(ctl_tx);
+    }
+
+    #[tokio::test]
+    async fn stop_with_connected_backlog_drains_every_chunk() {
+        let (listener, request) = local_request().await;
+        let (audio_tx, audio_rx) = unbounded_channel();
+        let (ctl_tx, ctl_rx) = unbounded_channel();
+        let (opened_tx, opened_rx) = tokio::sync::oneshot::channel();
+        let opened_tx = std::sync::Mutex::new(Some(opened_tx));
+        let speech: Vec<_> = (1..=64)
+            .map(|value| vec![value; config::audio_chunk_samples() * 2])
+            .collect();
+        let queued = speech.clone();
+        tokio::time::timeout(std::time::Duration::from_secs(3), async {
+            tokio::join!(
+                run_request(request, audio_rx, ctl_rx, |event| {
+                    if event == AsrEvent::Opened {
+                        opened_tx.lock().unwrap().take().unwrap().send(()).unwrap();
+                    }
+                }),
+                expect_audio_then_results(listener, speech, None),
+                async move {
+                    opened_rx.await.unwrap();
+                    // Queue faster than the transport can send, then stop capture.
+                    for chunk in queued {
+                        audio_tx.send(chunk).unwrap();
+                    }
+                    drop(audio_tx);
+                },
+            );
+        })
+        .await
+        .expect("connected backlog must drain before silence");
         drop(ctl_tx);
     }
 
@@ -474,14 +526,80 @@ mod tests {
         let events = std::sync::Mutex::new(Vec::new());
         tokio::time::timeout(std::time::Duration::from_secs(3), async {
             tokio::join!(
-                run_request(request, audio_rx, ctl_rx, |e| events.lock().unwrap().push(e)),
+                run_request(request, audio_rx, ctl_rx, |e| events
+                    .lock()
+                    .unwrap()
+                    .push(e)),
                 async {
                     let (tcp, _) = listener.accept().await.unwrap();
                     let mut socket = tokio_tungstenite::accept_async(tcp).await.unwrap();
                     assert!(matches!(socket.next().await, Some(Ok(Message::Close(_)))));
                 },
             );
-        }).await.expect("cancellation must not drain audio");
+        })
+        .await
+        .expect("cancellation must not drain audio");
+        assert_eq!(*events.lock().unwrap(), vec![AsrEvent::Opened]);
+    }
+
+    #[tokio::test]
+    async fn empty_capture_still_sends_trailing_silence_once() {
+        let (listener, request) = local_request().await;
+        let (audio_tx, audio_rx) = unbounded_channel();
+        let (ctl_tx, ctl_rx) = unbounded_channel();
+        drop(audio_tx);
+        let events = std::sync::Mutex::new(Vec::new());
+        tokio::time::timeout(std::time::Duration::from_secs(3), async {
+            tokio::join!(
+                run_request(request, audio_rx, ctl_rx, |e| events
+                    .lock()
+                    .unwrap()
+                    .push(e)),
+                expect_audio_then_results(listener, Vec::new(), None),
+            );
+        })
+        .await
+        .expect("empty capture must still finalize");
+        drop(ctl_tx);
+        assert_eq!(
+            events
+                .lock()
+                .unwrap()
+                .iter()
+                .filter(|e| **e == AsrEvent::AudioDrained)
+                .count(),
+            1
+        );
+    }
+
+    #[tokio::test]
+    async fn cancellation_while_capture_is_alive_does_not_wait_for_eof() {
+        let (listener, request) = local_request().await;
+        let (audio_tx, audio_rx) = unbounded_channel();
+        let (ctl_tx, ctl_rx) = unbounded_channel();
+        audio_tx.send(vec![1, 2]).unwrap();
+        let events = std::sync::Mutex::new(Vec::new());
+        tokio::time::timeout(std::time::Duration::from_secs(3), async {
+            tokio::join!(
+                run_request(request, audio_rx, ctl_rx, |e| events
+                    .lock()
+                    .unwrap()
+                    .push(e)),
+                async {
+                    let (tcp, _) = listener.accept().await.unwrap();
+                    let mut socket = tokio_tungstenite::accept_async(tcp).await.unwrap();
+                    assert_eq!(
+                        socket.next().await.unwrap().unwrap(),
+                        Message::Binary(vec![1, 2])
+                    );
+                    ctl_tx.send(Ctl::Disconnect).unwrap();
+                    assert!(matches!(socket.next().await, Some(Ok(Message::Close(_)))));
+                },
+            );
+        })
+        .await
+        .expect("cancellation must not wait for capture shutdown");
+        drop(audio_tx);
         assert_eq!(*events.lock().unwrap(), vec![AsrEvent::Opened]);
     }
 
@@ -552,7 +670,10 @@ mod tests {
             assert_eq!(http_failure(status, None), AsrEvent::AuthError);
         }
         assert_eq!(
-            http_failure(200, Some(br#"{"code":710012001,"message":"login invalid"}"#)),
+            http_failure(
+                200,
+                Some(br#"{"code":710012001,"message":"login invalid"}"#)
+            ),
             AsrEvent::AuthError
         );
         assert_eq!(
@@ -611,7 +732,10 @@ mod tests {
             AsrEvent::Error(_)
         ));
         for code in [None, Some(CloseCode::Away), Some(CloseCode::Error)] {
-            assert!(matches!(server_close_event(false, code), AsrEvent::Error(_)));
+            assert!(matches!(
+                server_close_event(false, code),
+                AsrEvent::Error(_)
+            ));
             assert!(matches!(server_close_event(true, code), AsrEvent::Error(_)));
         }
     }
@@ -669,6 +793,9 @@ mod tests {
     #[test]
     fn percent_encoding_escapes_reserved_characters() {
         assert_eq!(percent_encode("a b"), "a%20b");
-        assert_eq!(percent_encode("use-olympus_account.x~"), "use-olympus_account.x~");
+        assert_eq!(
+            percent_encode("use-olympus_account.x~"),
+            "use-olympus_account.x~"
+        );
     }
 }
