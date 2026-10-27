@@ -41,7 +41,6 @@ class OverlayRole(Enum):
     """Screen role used to anchor an overlay-style window."""
 
     STATUS = "status"
-    PTT = "ptt"
     # The on-screen keyboard manages its own position/size (restored from
     # config, draggable by the user), so it is pinned above + non-focusing
     # like the others but never auto-positioned.
@@ -49,7 +48,7 @@ class OverlayRole(Enum):
 
 
 def apply_overlay_window_hints(window: Gtk.Window, role: OverlayRole) -> None:
-    """Make an overlay/PTT window as stable as the platform permits."""
+    """Make an overlay window as stable as the platform permits."""
     if _HAS_LAYER_SHELL and LayerShell is not None:
         _apply_layer_shell(window, role)
         return
@@ -75,10 +74,7 @@ def _apply_layer_shell(window: Gtk.Window, role: OverlayRole) -> None:
         edge = getattr(LayerShell.Edge, edge_name)
         LayerShell.set_anchor(window, edge, False)
 
-    if role == OverlayRole.PTT:
-        LayerShell.set_anchor(window, LayerShell.Edge.BOTTOM, True)
-        LayerShell.set_margin(window, LayerShell.Edge.BOTTOM, 24)
-    elif role == OverlayRole.STATUS:
+    if role == OverlayRole.STATUS:
         LayerShell.set_anchor(window, LayerShell.Edge.TOP, True)
         LayerShell.set_anchor(window, LayerShell.Edge.LEFT, True)
         _position_overlay_center_bottom(window)
@@ -202,9 +198,7 @@ def _x11_pin_above(window: Gtk.Window, role: OverlayRole, state: dict) -> bool:
         if monitor is not None:
             geo = monitor.get_geometry()
             x = geo.x + (geo.width - width) // 2
-            if role == OverlayRole.PTT:
-                y = geo.y + geo.height - height - 24
-            elif role == OverlayRole.STATUS:
+            if role == OverlayRole.STATUS:
                 y = geo.y + geo.height * 3 // 5
             else:
                 y = geo.y + 16

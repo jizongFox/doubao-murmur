@@ -139,7 +139,6 @@ OVERLAY_HEIGHT = 88
 # height up to OVERLAY_MAX_LINES before the oldest words scroll off.
 OVERLAY_TEXT_CHARS = 88
 OVERLAY_MAX_LINES = 5
-PTT_BUTTON_SIZE = 60
 
 # --- User-Agent for WebView ---
 

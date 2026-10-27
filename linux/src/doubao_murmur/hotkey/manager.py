@@ -6,12 +6,7 @@ Two backends, both started when available:
 2. evdev /dev/input (evdev_listener) — needs the `input` group, plus
    --device=input when sandboxed. The only one that works on a Wayland
    session, where keys sent to native Wayland windows never reach
-   XWayland and are therefore invisible to XRecord.
-
-`overlay_button` is vestigial: the on-screen push-to-talk button was
-removed in 6555ffa and app.py passes None. Reviving it would give Wayland
-users a trigger that needs no /dev/input access at all — see
-hotkey/overlay_button.py.
+    XWayland and are therefore invisible to XRecord.
 """
 
 from __future__ import annotations
@@ -42,7 +37,6 @@ class HotkeyManager:
         self.on_stop = None  # () -> None
         self.on_cancel = None  # () -> None
         self.on_keyboard = None  # () -> None (toggle on-screen keyboard)
-        self._overlay_button = None
         self._evdev_listener = None
         self._x11_listener = None
         self._cancel_enabled = False
@@ -52,11 +46,8 @@ class HotkeyManager:
         self._hold_active = False
         self._last_hold_release_time = 0.0
 
-    def start(
-        self, overlay_button=None, evdev_listener=None, x11_listener=None
-    ) -> None:
+    def start(self, evdev_listener=None, x11_listener=None) -> None:
         """Initialize input backends."""
-        self._overlay_button = overlay_button
         self._evdev_listener = evdev_listener
         self._x11_listener = x11_listener
 
