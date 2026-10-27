@@ -8,6 +8,19 @@ import pytest
 from doubao_murmur.paste.paste_helper import PasteHelper
 
 
+@pytest.fixture(autouse=True)
+def isolate_desktop_backends():
+    """Never inject real keys or query the running compositor in unit tests."""
+    with patch(
+        "doubao_murmur.paste.paste_helper.UinputPaster.is_available",
+        return_value=False,
+    ), patch(
+        "doubao_murmur.paste.paste_helper.kwin_active_window_class",
+        return_value="",
+    ):
+        yield
+
+
 class TestCopyToClipboard:
     def test_wl_copy_preferred(self):
         with patch("shutil.which", return_value="/usr/bin/wl-copy") as mock_which, \
