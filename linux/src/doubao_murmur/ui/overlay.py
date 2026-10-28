@@ -25,6 +25,7 @@ from doubao_murmur.config import (
     OVERLAY_WIDTH,
     get_overlay_config_path,
 )
+from doubao_murmur.session_status import ConnectionPhase, SessionFault, SessionStatus
 from doubao_murmur.ui.windowing import (
     OverlayRole,
     apply_overlay_window_hints,
@@ -54,7 +55,45 @@ _OVERLAY_CSS = b"""
 .overlay-label.error {
     color: #ff6666;
 }
+.overlay-diagnostics {
+    color: #bbbbbb;
+    font-size: 12px;
+}
+.overlay-diagnostics.error {
+    color: #ff9999;
+}
 """
+
+
+_FAULT_TEXT = {
+    SessionFault.MICROPHONE: "麦克风启动失败，请检查输入设备",
+    SessionFault.PARAMETERS: "无法获取连接参数，请重新登录",
+    SessionFault.CREDENTIAL_SAVE: "无法保存登录凭证，请重试",
+    SessionFault.PARAMETER_TIMEOUT: "获取连接参数超时，请重试",
+    SessionFault.CONNECTION_TIMEOUT: "连接识别服务超时，请重试",
+    SessionFault.CONNECTION_FAILED: "无法连接识别服务，请检查网络后重试",
+    SessionFault.DISCONNECTED: "识别连接已中断，请重试",
+    SessionFault.SERVICE: "识别服务报错，请稍后重试",
+    SessionFault.AUTH: "登录已失效，请重新登录",
+    SessionFault.NO_TEXT: "未收到识别文字，请检查麦克风或重试",
+}
+
+
+def diagnostic_text(status: SessionStatus, now: float) -> str:
+    """Render observed facts, never infer network quality from missing text."""
+    if status.fault is not None:
+        return _FAULT_TEXT[status.fault]
+    elapsed = max(0, int(now - status.phase_since))
+    if status.phase == ConnectionPhase.PARAMETERS:
+        return f"正在获取连接参数 · 已等待 {elapsed} 秒"
+    if status.phase == ConnectionPhase.CONNECTING:
+        return f"正在连接识别服务 · 已等待 {elapsed} 秒"
+    if status.phase == ConnectionPhase.CONNECTED:
+        if status.last_response_at is None:
+            return f"已连接 · 等待首个服务响应 {elapsed} 秒"
+        age = max(0, int(now - status.last_response_at))
+        return f"已连接 · 最近服务响应 {age} 秒前"
+    return ""
 
 
 class Overlay:
@@ -65,6 +104,7 @@ class Overlay:
         self.on_cancel = None  # () -> None
         self._window: Gtk.Window | None = None
         self._label: Gtk.Label | None = None
+        self._diagnostics: Gtk.Label | None = None
         self._indicator: Gtk.DrawingArea | None = None
         self._saved_x: int | None = None
         self._saved_y: int | None = None
@@ -73,6 +113,14 @@ class Overlay:
         self._drag_new_pos: tuple[int, int] | None = None
         self._anim_timer: int = 0
         self._load_position()
+        for signal in (
+            "recording-state-changed", "transcription-text-changed",
+            "error-message-changed", "session-status-changed",
+        ):
+            app_state.connect(signal, self._on_content_changed)
+
+    def _on_content_changed(self, *_args) -> None:
+        self._update_content()
 
     def _create_window(self) -> None:
         self._window = Gtk.Window()
@@ -106,7 +154,16 @@ class Overlay:
         self._label.set_lines(OVERLAY_MAX_LINES)
         self._label.set_ellipsize(Pango.EllipsizeMode.START)
         self._label.add_css_class("overlay-label")
-        box.append(self._label)
+        text_box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=6)
+        text_box.append(self._label)
+        self._diagnostics = Gtk.Label()
+        self._diagnostics.set_xalign(0)
+        self._diagnostics.set_wrap(True)
+        self._diagnostics.set_wrap_mode(Pango.WrapMode.WORD_CHAR)
+        self._diagnostics.set_max_width_chars(OVERLAY_TEXT_CHARS)
+        self._diagnostics.add_css_class("overlay-diagnostics")
+        text_box.append(self._diagnostics)
+        box.append(text_box)
 
         self._window.set_child(box)
 
@@ -226,6 +283,7 @@ class Overlay:
     def _tick_indicator(self) -> bool:
         if self._indicator:
             self._indicator.queue_draw()
+            self._update_diagnostics()
             return GLib.SOURCE_CONTINUE
         self._anim_timer = 0
         return GLib.SOURCE_REMOVE
@@ -258,8 +316,26 @@ class Overlay:
 
     def _update_content(self) -> None:
         self.update_text(self.app_state.transcription_text)
+        self._update_diagnostics()
+
+    def _update_diagnostics(self) -> None:
+        if self._diagnostics is None:
+            return
+        status = self.app_state.session_status
+        text = diagnostic_text(status, time.monotonic())
+        text = f"网络 / 识别：{text}" if text else ""
+        if self._diagnostics.get_text() != text:
+            self._diagnostics.set_text(text)
+        if status.fault is not None:
+            self._diagnostics.add_css_class("error")
+        else:
+            self._diagnostics.remove_css_class("error")
 
     def _status_text(self) -> str:
+        if self.app_state.session_status.fault is not None:
+            if self.app_state.session_status.fault == SessionFault.NO_TEXT:
+                return "本次未收到识别文字"
+            return "本次语音输入未完成"
         state = self.app_state.recording_state
         return {
             RecordingState.STARTING: "正在聆听，可直接说话...",

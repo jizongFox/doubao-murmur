@@ -10,10 +10,13 @@ pytest.importorskip("gi")
 from doubao_murmur import transcription as module
 from doubao_murmur.app_state import AppState, LoginStatus, RecordingState
 from doubao_murmur.config import (
-    AUTH_EXPIRY_DELAY,
     FINAL_RESULT_QUIET_PERIOD,
     STOP_SAFETY_TIMEOUT,
+    SESSION_START_TIMEOUT,
+    SESSION_NOTICE_DURATION,
 )
+from doubao_murmur.session_status import ConnectionPhase, SessionFault
+from doubao_murmur.asr_client import ASRServiceError
 
 
 class FakeGLib:
@@ -53,6 +56,7 @@ class FakeGLib:
 def recording(monkeypatch):
     glib = FakeGLib()
     monkeypatch.setattr(module, "GLib", glib)
+    monkeypatch.setattr(module.time, "monotonic", lambda: glib.now / 1000)
     monkeypatch.setattr(module, "ASRClient", Mock(side_effect=lambda: Mock()))
     monkeypatch.setattr(module, "AudioCapture", Mock())
     monkeypatch.setattr(module, "ParamsStore", Mock())
@@ -139,6 +143,8 @@ def test_cancelled_recording_ignores_late_auth_error(recording):
     ("on_finish", ()),
     ("on_error", (RuntimeError("old network error"),)),
     ("on_auth_error", ()),
+    ("on_response", ()),
+    ("on_close", ()),
 ])
 def test_cancelled_session_ignores_callbacks(recording, next_state, event, args):
     manager, glib = recording
@@ -205,7 +211,7 @@ def test_cancelled_session_ignores_parameter_extraction(recording, restart, para
     expected_state = manager.app_state.recording_state
 
     callbacks[0](params)
-    glib.advance(int(AUTH_EXPIRY_DELAY * 1000))
+    glib.advance(int(SESSION_NOTICE_DURATION * 1000))
 
     assert manager.app_state.recording_state == expected_state
     assert manager.app_state.error_message is None
@@ -290,7 +296,7 @@ def test_old_error_reset_does_not_stop_next_recording(recording):
     manager.handle_cancel()
     manager.handle_start()
     manager._on_asr_open()
-    glib.advance(int(AUTH_EXPIRY_DELAY * 1000))
+    glib.advance(int(SESSION_NOTICE_DURATION * 1000))
 
     assert manager.app_state.recording_state == RecordingState.RECORDING
 
@@ -299,7 +305,7 @@ def test_error_reset_still_returns_to_idle(recording):
     manager, glib = recording
     manager.handle_start()
     manager._on_asr_error(RuntimeError("network unavailable"))
-    glib.advance(int(AUTH_EXPIRY_DELAY * 1000))
+    glib.advance(int(SESSION_NOTICE_DURATION * 1000))
 
     assert manager.app_state.recording_state == RecordingState.IDLE
     manager.on_paste.assert_not_called()
@@ -325,7 +331,7 @@ def test_repeated_errors_have_one_reset(recording):
     manager._on_asr_error(RuntimeError("first error"))
     glib.advance(100)
     manager._on_asr_error(RuntimeError("second error"))
-    glib.advance(int(AUTH_EXPIRY_DELAY * 1000) + 200)
+    glib.advance(int(SESSION_NOTICE_DURATION * 1000) + 200)
 
     manager.asr_client.disconnect.assert_called_once_with()
     assert manager.app_state.recording_state == RecordingState.IDLE
@@ -341,13 +347,154 @@ def test_startup_failure_reset_is_cancelled_for_next_recording(recording, failur
         if failure == "extraction":
             manager.on_params_needed = lambda callback: callback(None)
     manager.handle_start()
-    assert manager.app_state.error_message is not None
+    assert manager.app_state.session_status.fault is not None
     manager.handle_cancel()
 
     manager.audio_capture.start.side_effect = None
     module.ParamsStore.load.return_value = Mock()
     manager.handle_start()
     manager._on_asr_open()
-    glib.advance(int(AUTH_EXPIRY_DELAY * 1000))
+    glib.advance(int(SESSION_NOTICE_DURATION * 1000))
 
     assert manager.app_state.recording_state == RecordingState.RECORDING
+
+
+@pytest.mark.parametrize("waiting_for_params", [False, True])
+def test_startup_deadline_covers_params_and_connection(recording, waiting_for_params):
+    manager, glib = recording
+    callbacks = []
+    if waiting_for_params:
+        module.ParamsStore.load.return_value = None
+        manager.on_params_needed = callbacks.append
+    manager.handle_start()
+    glib.advance(int(SESSION_START_TIMEOUT * 1000))
+
+    assert manager.app_state.recording_state == RecordingState.IDLE
+    assert manager.app_state.session_status.fault == (
+        SessionFault.PARAMETER_TIMEOUT if waiting_for_params
+        else SessionFault.CONNECTION_TIMEOUT
+    )
+    manager.audio_capture.stop.assert_called_once()
+    manager.asr_client.disconnect.assert_called_once()
+    manager.on_overlay_hide.assert_not_called()
+    module.ParamsStore.clear.assert_not_called()
+    if callbacks:
+        callbacks[0](Mock())
+        manager.asr_client.connect.assert_not_called()
+        module.ParamsStore.save.assert_not_called()
+
+
+def test_stopping_before_connect_keeps_speech_until_original_deadline(recording):
+    manager, glib = recording
+    manager.handle_start()
+    glib.advance(1000)
+    manager.handle_stop()
+    glib.advance(int(STOP_SAFETY_TIMEOUT * 1000))
+    assert manager.app_state.recording_state == RecordingState.STOPPING
+    manager.asr_client.disconnect.assert_not_called()
+
+    glib.advance(int(SESSION_START_TIMEOUT * 1000) - glib.now)
+    assert manager.app_state.recording_state == RecordingState.IDLE
+    assert manager.app_state.session_status.fault == SessionFault.CONNECTION_TIMEOUT
+    manager.on_paste.assert_not_called()
+
+
+def test_connection_after_stop_starts_final_result_budget(recording):
+    manager, glib = recording
+    manager.handle_start()
+    manager.handle_stop()
+    glib.advance(3000)
+    manager.asr_client.on_open()
+    glib.advance(0)
+    assert manager.app_state.session_status.phase == ConnectionPhase.CONNECTED
+    assert manager.app_state.recording_state == RecordingState.STOPPING
+    glib.advance(int(STOP_SAFETY_TIMEOUT * 1000) - 1)
+    manager.asr_client.on_result("buffered speech")
+    glib.advance(0)
+    glib.advance(1)
+    manager.on_paste.assert_called_once_with("buffered speech")
+    glib.advance(int(SESSION_START_TIMEOUT * 1000))
+    assert manager.app_state.session_status.fault is None
+
+
+def test_empty_responses_update_health_without_completing_or_erasing_text(recording):
+    manager, glib = recording
+    manager.handle_start()
+    manager.asr_client.on_open()
+    manager.asr_client.on_result("keep this text")
+    glib.advance(0)
+    manager.handle_stop()
+    manager.asr_client.on_response()
+    glib.advance(0)
+    glib.advance(int(FINAL_RESULT_QUIET_PERIOD * 1000) + 1)
+    assert manager.app_state.session_status.last_response_at == 0
+    assert manager.app_state.transcription_text == "keep this text"
+    assert manager.app_state.recording_state == RecordingState.STOPPING
+    manager.on_paste.assert_not_called()
+
+
+@pytest.mark.parametrize("ending", ["timeout", "finish", "close"])
+def test_empty_completion_releases_resources_but_keeps_notice(recording, ending):
+    manager, glib = recording
+    manager.handle_start()
+    manager.asr_client.on_open()
+    glib.advance(0)
+    manager.handle_stop()
+    if ending == "timeout":
+        glib.advance(int(STOP_SAFETY_TIMEOUT * 1000))
+    else:
+        getattr(manager.asr_client, f"on_{ending}")()
+        glib.advance(0)
+
+    assert manager.app_state.recording_state == RecordingState.IDLE
+    assert manager.app_state.session_status.fault == SessionFault.NO_TEXT
+    manager.asr_client.disconnect.assert_called_once()
+    manager.on_paste.assert_not_called()
+    manager.on_overlay_hide.assert_not_called()
+    glib.advance(int(SESSION_NOTICE_DURATION * 1000))
+    manager.on_overlay_hide.assert_called_once()
+    assert manager.app_state.session_status.fault is None
+
+
+@pytest.mark.parametrize("error, fault", [
+    (OSError("network unavailable"), SessionFault.CONNECTION_FAILED),
+    (TimeoutError(), SessionFault.CONNECTION_TIMEOUT),
+    (ASRServiceError("busy"), SessionFault.SERVICE),
+])
+def test_failure_releases_immediately_and_old_notice_cannot_hide_new_session(
+    recording, error, fault
+):
+    manager, glib = recording
+    manager.handle_start()
+    old_client = manager.asr_client
+    old_client.on_error(error)
+    glib.advance(0)
+    assert manager.app_state.session_status.fault == fault
+    assert manager.app_state.recording_state == RecordingState.IDLE
+    old_client.disconnect.assert_called_once()
+    manager.audio_capture.stop.assert_called_once()
+    module.ParamsStore.clear.assert_not_called()
+
+    manager.handle_start()  # No cancellation/recovery delay is required.
+    manager.asr_client.on_open()
+    glib.advance(0)
+    old_client.on_close()
+    old_client.on_error(error)
+    glib.advance(int(SESSION_NOTICE_DURATION * 1000))
+    assert manager.app_state.recording_state == RecordingState.RECORDING
+    assert manager.app_state.session_status.fault is None
+    manager.on_overlay_hide.assert_not_called()
+
+
+def test_unexpected_peer_close_preserves_partial_text_without_pasting(recording):
+    manager, glib = recording
+    manager.handle_start()
+    manager.asr_client.on_open()
+    manager.asr_client.on_result("partial text")
+    manager.asr_client.on_close()
+    glib.advance(0)
+    assert manager.app_state.recording_state == RecordingState.IDLE
+    assert manager.app_state.session_status.fault == SessionFault.DISCONNECTED
+    assert manager.app_state.transcription_text == "partial text"
+    manager.on_paste.assert_not_called()
+    module.ParamsStore.clear.assert_not_called()
