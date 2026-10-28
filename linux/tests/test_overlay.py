@@ -67,7 +67,15 @@ def test_response_age_does_not_claim_network_quality_or_missing_speech():
     status = SessionStatus(
         phase=ConnectionPhase.CONNECTED, phase_since=10, last_response_at=11
     )
-    assert diagnostic_text(status, 30) == "已连接 · 最近服务响应 19 秒前"
+    assert diagnostic_text(status, 30) == "已连接 · 最近服务响应 19000 ms 前"
+
+
+def test_response_age_shows_subsecond_precision():
+    status = SessionStatus(
+        phase=ConnectionPhase.CONNECTED, last_response_at=10
+    )
+    assert diagnostic_text(status, 10.125) == "已连接 · 最近服务响应 125 ms 前"
+    assert diagnostic_text(status, 9) == "已连接 · 最近服务响应 0 ms 前"
 
 
 @pytest.mark.parametrize("fault", list(SessionFault))

@@ -91,8 +91,8 @@ def diagnostic_text(status: SessionStatus, now: float) -> str:
     if status.phase == ConnectionPhase.CONNECTED:
         if status.last_response_at is None:
             return f"已连接 · 等待首个服务响应 {elapsed} 秒"
-        age = max(0, int(now - status.last_response_at))
-        return f"已连接 · 最近服务响应 {age} 秒前"
+        age_ms = max(0, int((now - status.last_response_at) * 1000))
+        return f"已连接 · 最近服务响应 {age_ms} ms 前"
     return ""
 
 
