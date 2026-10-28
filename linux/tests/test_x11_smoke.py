@@ -92,3 +92,36 @@ def test_delivery_gtk_clipboard_fallback(monkeypatch):
     assert outcomes == [DeliveryOutcome.PASTE_REQUESTED]
     assert clipboard_text == ["isolated GTK delivery test"]
     paste.assert_called_once()
+
+
+def test_overlay_diagnostics_with_real_gtk(tmp_path, monkeypatch):
+    """Build/measure real labels without presenting a window or reading keys."""
+    import gi
+
+    gi.require_version("Gtk", "4.0")
+    from gi.repository import Gtk
+
+    from doubao_murmur.app_state import AppState, RecordingState
+    from doubao_murmur.session_status import ConnectionPhase, SessionFault, SessionStatus
+    from doubao_murmur.ui.overlay import Overlay
+
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path))
+    Gtk.init()
+    state = AppState()
+    overlay = Overlay(state)
+    overlay._create_window()
+    try:
+        state.recording_state = RecordingState.RECORDING
+        state.session_status = SessionStatus(phase=ConnectionPhase.CONNECTED)
+        assert "已连接" in overlay._diagnostics.get_text()
+        state.transcription_text = "检查真实 GTK 标签更新"
+        state.session_status = SessionStatus(
+            phase=ConnectionPhase.CLOSED, fault=SessionFault.DISCONNECTED
+        )
+        assert overlay._label.get_text() == "检查真实 GTK 标签更新"
+        assert "连接已中断" in overlay._diagnostics.get_text()
+        assert overlay._diagnostics.has_css_class("error")
+        assert overlay._window.measure(Gtk.Orientation.VERTICAL, 760)[0] > 0
+        assert not overlay._window.get_visible()
+    finally:
+        overlay._window.destroy()

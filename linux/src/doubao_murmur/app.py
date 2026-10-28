@@ -83,7 +83,6 @@ class DoubaoMurmurApp(Gtk.Application):
         self.transcription_manager.on_paste = self._do_paste
         self.transcription_manager.on_overlay_show = self._show_overlay
         self.transcription_manager.on_overlay_hide = self._hide_overlay
-        self.transcription_manager.on_overlay_update = self._update_overlay
         self.transcription_manager.on_params_needed = self._extract_params
         self.transcription_manager.on_save_params = self._save_params
         self.transcription_manager.on_cancel_enabled_changed = (
@@ -277,10 +276,6 @@ class DoubaoMurmurApp(Gtk.Application):
     def _hide_overlay(self) -> None:
         if self.overlay:
             self.overlay.hide()
-
-    def _update_overlay(self, text: str) -> None:
-        if self.overlay:
-            self.overlay.update_text(text)
 
     def _on_cancel_enabled_changed(self, enabled: bool) -> None:
         if self.hotkey_manager:
