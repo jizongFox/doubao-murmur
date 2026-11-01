@@ -89,15 +89,31 @@ def test_cli_copy_and_paste_run_off_gtk_and_report_on_gtk(delivery):
     d.gtk_copy.assert_not_called()
 
 
-def test_no_paste_after_all_copy_backends_fail(delivery):
+@pytest.mark.parametrize("paste_requested", [False, True])
+def test_no_paste_after_all_copy_backends_fail(delivery, paste_requested):
     d = delivery
     d.copy.return_value = False
-    d.service.submit("must not paste the old clipboard")
+    d.service.submit("must not paste the old clipboard", paste=paste_requested)
     d.gtk.until(lambda: d.outcomes)
 
     d.gtk_copy.assert_called_once()
     d.paste.assert_not_called()
     assert d.outcomes == [DeliveryOutcome.FAILED]
+
+
+@pytest.mark.parametrize("gtk_fallback", [False, True])
+def test_copy_only_uses_clipboard_backends_without_injecting_keys(delivery, gtk_fallback):
+    d = delivery
+    d.copy.return_value = not gtk_fallback
+    d.gtk_copy.return_value = True
+
+    d.service.submit("interrupted speech", paste=False)
+    d.gtk.until(lambda: d.outcomes)
+
+    d.copy.assert_called_once_with("interrupted speech", d.service._closed)
+    assert d.gtk_copy.called is gtk_fallback
+    d.paste.assert_not_called()
+    assert d.outcomes == [DeliveryOutcome.COPIED]
 
 
 def test_gtk_fallback_runs_on_main_and_still_precedes_paste(delivery):
@@ -167,12 +183,13 @@ def test_requests_are_ordered_and_slow_helper_does_not_block_gtk(delivery):
     assert stages == [("copy", "first"), ("paste",), ("copy", "second"), ("paste",)]
 
 
-def test_gtk_fallback_cannot_be_overtaken_by_next_request(delivery):
+@pytest.mark.parametrize("first_paste, second_paste", [(True, True), (False, True), (True, False)])
+def test_gtk_fallback_cannot_be_overtaken_by_next_request(delivery, first_paste, second_paste):
     d = delivery
     d.copy.return_value = False
     d.gtk_copy.return_value = True
-    d.service.submit("first")
-    d.service.submit("second")
+    d.service.submit("first", paste=first_paste)
+    d.service.submit("second", paste=second_paste)
     # Wait for the first GTK copy request without executing it yet.
     pending = d.gtk.pending.get(timeout=5)
     assert d.copy.call_count == 1
@@ -181,7 +198,10 @@ def test_gtk_fallback_cannot_be_overtaken_by_next_request(delivery):
     d.gtk.until(lambda: len(d.outcomes) == 2)
 
     assert [call.args[0] for call in d.gtk_copy.call_args_list] == ["first", "second"]
-    assert d.outcomes == [DeliveryOutcome.PASTE_REQUESTED] * 2
+    assert d.outcomes == [
+        DeliveryOutcome.PASTE_REQUESTED if paste else DeliveryOutcome.COPIED
+        for paste in (first_paste, second_paste)
+    ]
 
 
 def test_close_during_slow_copy_discards_later_delivery(delivery):
@@ -342,6 +362,52 @@ def test_recording_cleans_up_while_delivery_is_still_blocked(application, delive
         release.set()
     d.gtk.until(lambda: d.outcomes)
     app.send_notification.assert_not_called()
+
+
+@pytest.mark.parametrize("ending", ["close", "error"])
+def test_interrupted_transcript_survives_ui_clear_and_next_recording(
+    application, delivery, ending
+):
+    from doubao_murmur import app as app_module, transcription
+
+    app, d = application, delivery
+    manager = app.transcription_manager
+    entered, release = threading.Event(), threading.Event()
+    clipboard = []
+
+    def slow_copy(text, *_):
+        entered.set()
+        assert release.wait(5)
+        clipboard.append(text)
+        return True
+
+    d.copy.side_effect = slow_copy
+    try:
+        manager.handle_start()
+        manager._on_asr_open()
+        manager._on_asr_result("earlier text")
+        manager._on_asr_result("latest text before disconnect")
+        if ending == "close":
+            manager._on_asr_close()
+        else:
+            manager._on_asr_error(OSError("connection reset"))
+        assert entered.wait(5)
+        transcription.GLib.advance(int(transcription.SESSION_NOTICE_DURATION * 1000))
+        assert manager.app_state.transcription_text == ""
+        manager.handle_start()
+        manager._on_asr_result("new recording")
+    finally:
+        release.set()
+    d.gtk.until(lambda: d.outcomes)
+
+    assert clipboard == ["latest text before disconnect"]
+    assert d.outcomes == [DeliveryOutcome.COPIED]
+    d.paste.assert_not_called()
+    assert manager.app_state.transcription_text == "new recording"
+    notification = app_module.Gio.Notification.new.return_value
+    assert "已复制到剪贴板" in notification.set_body.call_args.args[0]
+    assert "无法自动粘贴" not in notification.set_body.call_args.args[0]
+    app.send_notification.assert_called_once()
 
 
 @pytest.mark.parametrize("outcome", list(DeliveryOutcome))

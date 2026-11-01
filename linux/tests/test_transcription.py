@@ -65,6 +65,7 @@ def recording(monkeypatch):
     manager = module.TranscriptionManager(state)
     manager.on_save_params = module.ParamsStore.save
     manager.on_paste = Mock()
+    manager.on_copy = Mock()
     manager.on_overlay_hide = Mock()
     manager.on_auth_expired = Mock()
     return manager, glib
@@ -100,6 +101,10 @@ def test_exit_cleans_up_once_without_pasting(recording, auth_failure):
     manager.audio_capture.stop.assert_called_once_with()
     manager.asr_client.disconnect.assert_called_once_with()
     manager.on_paste.assert_not_called()
+    if auth_failure:
+        manager.on_copy.assert_called_once_with("unfinished")
+    else:
+        manager.on_copy.assert_not_called()
     assert manager.app_state.recording_state == RecordingState.IDLE
 
 
@@ -173,6 +178,7 @@ def test_cancelled_session_ignores_callbacks(recording, next_state, event, args)
     module.ParamsStore.clear.assert_not_called()
     manager.on_auth_expired.assert_not_called()
     manager.on_paste.assert_not_called()
+    manager.on_copy.assert_not_called()
 
 
 def test_recording_uses_a_fresh_client_and_dispatches_current_events(recording):
@@ -194,6 +200,7 @@ def test_recording_uses_a_fresh_client_and_dispatches_current_events(recording):
     manager.asr_client.on_finish()
     glib.advance(0)
     manager.on_paste.assert_called_once_with("current recording")
+    manager.on_copy.assert_not_called()
 
 
 @pytest.mark.parametrize("restart", [False, True])
@@ -497,4 +504,72 @@ def test_unexpected_peer_close_preserves_partial_text_without_pasting(recording)
     assert manager.app_state.session_status.fault == SessionFault.DISCONNECTED
     assert manager.app_state.transcription_text == "partial text"
     manager.on_paste.assert_not_called()
+    manager.on_copy.assert_called_once_with("partial text")
     module.ParamsStore.clear.assert_not_called()
+
+
+@pytest.mark.parametrize("ending", ["close", "network", "timeout", "service", "auth"])
+def test_failed_session_copies_latest_result_once_before_cleanup(recording, ending):
+    manager, glib = recording
+    manager.handle_start()
+    client = manager.asr_client
+    client.on_open()
+    client.on_result("earlier hypothesis")
+    client.on_result("  corrected complete transcript  ")
+    glib.advance(0)
+
+    def copy_before_cleanup(text):
+        client.disconnect.assert_not_called()
+        assert manager.app_state.recording_state == RecordingState.RECORDING
+
+    manager.on_copy.side_effect = copy_before_cleanup
+    if ending == "close":
+        client.on_close()
+    elif ending == "auth":
+        client.on_auth_error()
+    else:
+        error = {
+            "network": OSError("connection reset"),
+            "timeout": TimeoutError("connection timed out"),
+            "service": ASRServiceError("service stopped"),
+        }[ending]
+        client.on_error(error)
+    # Other terminal callbacks may already be queued for the failed session.
+    client.on_close()
+    client.on_error(OSError("late error"))
+    glib.advance(0)
+
+    manager.on_copy.assert_called_once_with("corrected complete transcript")
+    manager.on_paste.assert_not_called()
+    client.disconnect.assert_called_once()
+    assert manager.app_state.recording_state == RecordingState.IDLE
+    glib.advance(int(SESSION_NOTICE_DURATION * 1000))
+    assert manager.app_state.transcription_text == ""
+    manager.on_copy.assert_called_once()
+
+
+@pytest.mark.parametrize("text", ["", " \n\t"])
+def test_failure_without_recognized_text_does_not_replace_clipboard(recording, text):
+    manager, glib = recording
+    manager.handle_start()
+    manager.asr_client.on_open()
+    manager.asr_client.on_result(text)
+    manager.asr_client.on_error(OSError("connection lost"))
+    glib.advance(int(SESSION_NOTICE_DURATION * 1000))
+
+    manager.on_copy.assert_not_called()
+    manager.on_paste.assert_not_called()
+
+
+def test_disconnect_while_waiting_for_final_result_copies_without_pasting(recording):
+    manager, glib = recording
+    manager.handle_start()
+    manager._on_asr_open()
+    manager._on_asr_result("latest recognized text")
+    manager.handle_stop()
+    manager.asr_client.on_error(OSError("connection reset while finalizing"))
+    glib.advance(int(SESSION_NOTICE_DURATION * 1000))
+
+    manager.on_copy.assert_called_once_with("latest recognized text")
+    manager.on_paste.assert_not_called()
+    assert not manager.awaiting_final_result

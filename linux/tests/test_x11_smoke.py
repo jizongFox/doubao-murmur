@@ -46,7 +46,8 @@ def test_x11_components_start(tmp_path, monkeypatch):
         login.destroy()
 
 
-def test_delivery_gtk_clipboard_fallback(monkeypatch):
+@pytest.mark.parametrize("paste_requested", [False, True])
+def test_delivery_gtk_clipboard_fallback(monkeypatch, paste_requested):
     """Exercise real GTK clipboard ownership without tools or key injection."""
     from unittest.mock import Mock
 
@@ -85,7 +86,7 @@ def test_delivery_gtk_clipboard_fallback(monkeypatch):
     service = TextDelivery(on_result=on_result)
     timer = GLib.timeout_add_seconds(5, timeout)
     try:
-        service.submit("isolated GTK delivery test")
+        service.submit("isolated GTK delivery test", paste=paste_requested)
         loop.run()
     finally:
         service.close()
@@ -95,9 +96,9 @@ def test_delivery_gtk_clipboard_fallback(monkeypatch):
 
     assert not timed_out
     assert not service._worker.is_alive()
-    assert outcomes == [DeliveryOutcome.PASTE_REQUESTED]
+    assert outcomes == [DeliveryOutcome.PASTE_REQUESTED if paste_requested else DeliveryOutcome.COPIED]
     assert clipboard_text == ["isolated GTK delivery test"]
-    paste.assert_called_once()
+    assert paste.call_count == int(paste_requested)
 
 
 def test_overlay_diagnostics_with_real_gtk(tmp_path, monkeypatch):
