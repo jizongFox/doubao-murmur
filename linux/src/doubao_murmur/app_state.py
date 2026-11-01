@@ -9,6 +9,8 @@ from enum import Enum
 
 from gi.repository import GLib, GObject
 
+from doubao_murmur.session_status import SessionStatus
+
 
 class LoginStatus(Enum):
     CHECKING = "checking"
@@ -31,6 +33,7 @@ class AppState(GObject.Object):
         "recording-state-changed": (GObject.SignalFlags.RUN_FIRST, None, (str,)),
         "transcription-text-changed": (GObject.SignalFlags.RUN_FIRST, None, (str,)),
         "error-message-changed": (GObject.SignalFlags.RUN_FIRST, None, (str,)),
+        "session-status-changed": (GObject.SignalFlags.RUN_FIRST, None, ()),
     }
 
     def __init__(self) -> None:
@@ -39,6 +42,17 @@ class AppState(GObject.Object):
         self._recording_state = RecordingState.IDLE
         self._transcription_text = ""
         self._error_message: str | None = None
+        self._session_status = SessionStatus()
+
+    @property
+    def session_status(self) -> SessionStatus:
+        return self._session_status
+
+    @session_status.setter
+    def session_status(self, value: SessionStatus) -> None:
+        if value != self._session_status:
+            self._session_status = value
+            self.emit("session-status-changed")
 
     @property
     def login_status(self) -> LoginStatus:

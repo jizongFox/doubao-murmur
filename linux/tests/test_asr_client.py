@@ -13,8 +13,8 @@ import pytest
 from doubao_murmur import asr_client as asr_client_module
 from doubao_murmur.asr_client import (
     ASRClient,
+    ASRServiceError,
     _load_websockets,
-    _is_connection_closed_error,
     _websocket_header_kwargs,
     is_handshake_auth_rejection,
 )
@@ -143,7 +143,7 @@ class TestMessageParsing:
         client._handle_message(msg)
         assert auth_errors == [True]
 
-    def test_non_auth_error_ignored(self, client):
+    def test_non_auth_error_reported_as_service_failure(self, client):
         errors = []
         client.on_error = lambda e: errors.append(e)
 
@@ -153,11 +153,13 @@ class TestMessageParsing:
             "message": "some other error",
         })
         client._handle_message(msg)
-        assert errors == []  # non-auth errors with code != 0 are silently ignored
+        assert len(errors) == 1
+        assert isinstance(errors[0], ASRServiceError)
 
     def test_empty_text_ignored(self, client):
         received = []
         client.on_result = lambda text: received.append(text)
+        client.on_response = Mock()
 
         msg = json.dumps({
             "code": 0,
@@ -166,6 +168,16 @@ class TestMessageParsing:
         })
         client._handle_message(msg)
         assert received == []
+        client.on_response.assert_called_once_with()
+
+    @pytest.mark.parametrize("message", [
+        "[]", "null", "1", "not json", '{"event":"result","result":42}',
+        '{"event":"result","result":{"Text":42}}',
+    ])
+    def test_malformed_message_is_not_a_valid_response(self, client, message):
+        client.on_response = Mock()
+        client._handle_message(message)
+        client.on_response.assert_not_called()
 
     def test_binary_message(self, client):
         received = []
@@ -261,14 +273,22 @@ def local_asr_server(handler, process_request=None):
 class TestServerClose:
     """Drive the real receive loop against a local server."""
 
-    @pytest.fixture
-    def recorder(self, client, monkeypatch):
+    @pytest.fixture(params=["default", "legacy"])
+    def recorder(self, client, monkeypatch, request):
+        if request.param == "legacy":
+            legacy = pytest.importorskip("websockets.legacy.client")
+            monkeypatch.setattr(
+                asr_client_module, "_load_websockets",
+                lambda: SimpleNamespace(connect=legacy.connect),
+            )
         fired = []
         opened = threading.Event()
         client.on_open = lambda: (fired.append("open"), opened.set())
         client.on_result = lambda text: fired.append(("result", text))
         client.on_error = lambda error: fired.append(("error", error))
         client.on_auth_error = lambda: fired.append("auth_error")
+        client.on_close = lambda: fired.append("close")
+        client.on_finish = lambda: fired.append("finish")
 
         def run(url, params, after_open=None):
             monkeypatch.setattr(asr_client_module, "WSS_BASE_URL", url)
@@ -302,7 +322,7 @@ class TestServerClose:
 
         with local_asr_server(handler) as url:
             fired = recorder(url, sample_params)
-        assert fired == ["open", ("result", "你好")]
+        assert fired == ["open", ("result", "你好"), "close"]
 
     def test_stopped_before_connect_still_sends_speech(
         self, client, recorder, sample_params
@@ -324,7 +344,29 @@ class TestServerClose:
             fired = recorder(url, sample_params)
 
         assert received == [b"speech", bytes(3200), bytes(3200)]
-        assert fired == ["open", ("result", "短句")]
+        assert fired == ["open", ("result", "短句"), "close"]
+
+    def test_finish_then_close_reports_one_terminal_outcome(self, recorder, sample_params):
+        async def handler(ws):
+            await ws.send(json.dumps({"code": 0, "event": "finish"}))
+            await ws.close()
+
+        with local_asr_server(handler) as url:
+            fired = recorder(url, sample_params)
+        assert fired == ["open", "finish"]
+
+    def test_abnormal_close_after_stop_is_still_reported(
+        self, client, recorder, sample_params
+    ):
+        async def handler(ws):
+            await ws.recv()  # The trailing silence signals finish_sending().
+            await ws.close(1011, "failed while finalising")
+
+        with local_asr_server(handler) as url:
+            fired = recorder(url, sample_params, after_open=client.finish_sending)
+        assert fired[0] == "open"
+        assert len(fired) == 2
+        assert fired[1][0] == "error"
 
     def test_tourist_limit_then_close_reports_auth_once(
         self, recorder, sample_params
@@ -410,6 +452,46 @@ class TestAudioBuffering:
 
 
 class TestConnectionLifetime:
+    @pytest.mark.parametrize("audio_stage", ["buffered", "recording", "trailing"])
+    def test_send_failure_is_reported_once_and_closes_worker(
+        self, client, sample_params, monkeypatch, audio_stage
+    ):
+        error = OSError("send failed")
+
+        class Socket:
+            send = AsyncMock(side_effect=error)
+            close = AsyncMock()
+
+            def __aiter__(self):
+                return self
+
+            async def __anext__(self):
+                await asyncio.Future()
+
+        socket = Socket()
+        connect = AsyncMock(return_value=socket)
+        monkeypatch.setattr(
+            asr_client_module, "_load_websockets",
+            lambda: SimpleNamespace(connect=connect),
+        )
+        client.on_error = Mock()
+        client.on_close = Mock()
+        if audio_stage == "buffered":
+            client.send_audio(b"speech")
+            client.finish_sending()
+        elif audio_stage == "recording":
+            client.on_open = lambda: client.send_audio(b"speech")
+        else:
+            client.on_open = client.finish_sending
+        client.connect(sample_params)
+        client._thread.join(5)
+
+        assert not client._thread.is_alive()
+        assert client._loop.is_closed()
+        client.on_error.assert_called_once_with(error)
+        client.on_close.assert_not_called()
+        socket.close.assert_awaited_once()
+
     @pytest.mark.parametrize("late_outcome", ["cancel", "socket", "error"])
     def test_disconnect_cancels_pending_handshake(
         self, client, sample_params, monkeypatch, late_outcome
@@ -561,10 +643,3 @@ class TestDependencyHandling:
 
         with pytest.raises(RuntimeError, match="websockets"):
             _load_websockets()
-
-    def test_connection_closed_error_detection(self):
-        class ConnectionClosedOK(Exception):
-            pass
-
-        assert _is_connection_closed_error(ConnectionClosedOK())
-        assert not _is_connection_closed_error(RuntimeError())

@@ -10,19 +10,24 @@ Key design decisions:
 
 from __future__ import annotations
 
+import asyncio
 import logging
+import time
+from dataclasses import replace
 
 from gi.repository import GLib
 
 from doubao_murmur.app_state import AppState, LoginStatus, RecordingState
-from doubao_murmur.asr_client import ASRClient, is_handshake_auth_rejection
+from doubao_murmur.asr_client import ASRClient, ASRServiceError, is_handshake_auth_rejection
 from doubao_murmur.audio_capture import AudioCapture
 from doubao_murmur.config import (
-    AUTH_EXPIRY_DELAY,
     FINAL_RESULT_QUIET_PERIOD,
+    SESSION_NOTICE_DURATION,
+    SESSION_START_TIMEOUT,
     STOP_SAFETY_TIMEOUT,
 )
 from doubao_murmur.params_store import ASRParams, ParamsStore
+from doubao_murmur.session_status import ConnectionPhase, SessionFault, SessionStatus
 
 logger = logging.getLogger(__name__)
 
@@ -41,7 +46,8 @@ class TranscriptionManager:
         self.safety_timer_id: int | None = None
         # Pending completion, rescheduled on each late result so only the last wins.
         self.quiet_timer_id: int | None = None
-        self.error_timer_id: int | None = None
+        self.start_timer_id: int | None = None
+        self.notice_timer_id: int | None = None
         self.clear_text_timer_id: int | None = None
 
         # Callbacks set by app.py
@@ -51,7 +57,6 @@ class TranscriptionManager:
         self.on_save_params = None  # (ASRParams) -> bool, after recording acceptance
         self.on_overlay_show = None  # () -> None
         self.on_overlay_hide = None  # () -> None
-        self.on_overlay_update = None  # (text: str) -> None
         self.on_paste = None  # (text: str) -> None
         self.on_cancel_enabled_changed = None  # (enabled: bool) -> None
 
@@ -65,6 +70,8 @@ class TranscriptionManager:
         self.asr_client.on_finish = lambda: dispatch(self._on_asr_finish)
         self.asr_client.on_error = lambda err: dispatch(self._on_asr_error, err)
         self.asr_client.on_auth_error = lambda: dispatch(self._on_auth_error)
+        self.asr_client.on_response = lambda: dispatch(self._on_asr_response)
+        self.asr_client.on_close = lambda: dispatch(self._on_asr_close)
 
     def _dispatch_session_callback(self, session: object, callback, *args) -> bool:
         """Old recordings cannot mutate state, even after a new one starts."""
@@ -113,6 +120,9 @@ class TranscriptionManager:
         self._set_state(RecordingState.STARTING)
         self.app_state.transcription_text = ""
         self.app_state.error_message = None
+        self.app_state.session_status = SessionStatus(
+            phase=ConnectionPhase.PARAMETERS, phase_since=time.monotonic()
+        )
         if self.on_overlay_show:
             self.on_overlay_show()
 
@@ -121,16 +131,18 @@ class TranscriptionManager:
             self.audio_capture.start(on_audio_data=self.asr_client.send_audio)
         except Exception as e:
             logger.error("Audio capture failed: %s", e)
-            self.app_state.error_message = "麦克风启动失败"
-            self._schedule_error_reset()
+            self._show_notice(SessionFault.MICROPHONE)
             return
 
+        self.start_timer_id = GLib.timeout_add(
+            int(SESSION_START_TIMEOUT * 1000), self._start_timeout
+        )
         # Try cached params first, fall back to WebView extraction
         cached = ParamsStore.load()
         if cached:
             logger.info("Using cached ASR params")
             self.using_cached_params = True
-            self.asr_client.connect(cached)
+            self._connect(cached)
         elif self.on_params_needed:
             self.using_cached_params = False
             self.on_params_needed(
@@ -139,8 +151,24 @@ class TranscriptionManager:
                 )
             )
         else:
-            self.app_state.error_message = "无法获取连接参数，请重新登录"
-            self._schedule_error_reset()
+            self._show_notice(SessionFault.PARAMETERS)
+
+    def _connect(self, params: ASRParams) -> None:
+        self.app_state.session_status = replace(
+            self.app_state.session_status,
+            phase=ConnectionPhase.CONNECTING, phase_since=time.monotonic(),
+        )
+        self.asr_client.connect(params)
+
+    def _start_timeout(self) -> bool:
+        self.start_timer_id = None
+        fault = (
+            SessionFault.PARAMETER_TIMEOUT
+            if self.app_state.session_status.phase == ConnectionPhase.PARAMETERS
+            else SessionFault.CONNECTION_TIMEOUT
+        )
+        self._show_notice(fault)
+        return GLib.SOURCE_REMOVE
 
     def _stop_recording(self) -> None:
         logger.info("Stopping recording...")
@@ -150,7 +178,12 @@ class TranscriptionManager:
         self.asr_client.finish_sending()
         self.awaiting_final_result = True
 
-        # Safety timeout
+        # Before connection, retain buffered speech under the original startup
+        # deadline. Only a connected stream gets the final-result timeout.
+        if self.app_state.session_status.phase == ConnectionPhase.CONNECTED:
+            self._schedule_stop_timeout()
+
+    def _schedule_stop_timeout(self) -> None:
         self.safety_timer_id = GLib.timeout_add(
             int(STOP_SAFETY_TIMEOUT * 1000), self._safety_timeout
         )
@@ -191,16 +224,32 @@ class TranscriptionManager:
     # --- ASR callbacks (on GTK main thread via GLib.idle_add) ---
 
     def _on_asr_open(self) -> bool:
+        if self.start_timer_id is not None:
+            GLib.source_remove(self.start_timer_id)
+            self.start_timer_id = None
+        self.app_state.session_status = replace(
+            self.app_state.session_status,
+            phase=ConnectionPhase.CONNECTED, phase_since=time.monotonic(),
+        )
         if self.app_state.recording_state == RecordingState.STARTING:
             self._set_state(RecordingState.RECORDING)
+        elif (
+            self.app_state.recording_state == RecordingState.STOPPING
+            and self.safety_timer_id is None
+        ):
+            self._schedule_stop_timeout()
+        return GLib.SOURCE_REMOVE
+
+    def _on_asr_response(self) -> bool:
+        self.app_state.session_status = replace(
+            self.app_state.session_status, last_response_at=time.monotonic()
+        )
         return GLib.SOURCE_REMOVE
 
     def _on_asr_result(self, text: str) -> bool:
         self.app_state.transcription_text = text
-        if self.on_overlay_update:
-            self.on_overlay_update(text)
-        if self.app_state.recording_state == RecordingState.STARTING:
-            self._set_state(RecordingState.RECORDING)
+        if self.app_state.session_status.phase != ConnectionPhase.CONNECTED:
+            self._on_asr_open()
         if self.awaiting_final_result:
             self._schedule_final_completion()
         return GLib.SOURCE_REMOVE
@@ -210,8 +259,16 @@ class TranscriptionManager:
         if self.app_state.recording_state in (
             RecordingState.STOPPING,
             RecordingState.RECORDING,
+            RecordingState.STARTING,
         ):
             self._complete_transcription()
+        return GLib.SOURCE_REMOVE
+
+    def _on_asr_close(self) -> bool:
+        if self.app_state.recording_state == RecordingState.STOPPING:
+            self._complete_transcription()
+        else:
+            self._show_notice(SessionFault.DISCONNECTED)
         return GLib.SOURCE_REMOVE
 
     def _on_asr_error(self, error) -> bool:
@@ -227,8 +284,15 @@ class TranscriptionManager:
         if self.using_cached_params and is_handshake_auth_rejection(error):
             self._handle_auth_failure()
             return GLib.SOURCE_REMOVE
-        self.app_state.error_message = "连接出错"
-        self._schedule_error_reset()
+        if isinstance(error, ASRServiceError):
+            fault = SessionFault.SERVICE
+        elif isinstance(error, (TimeoutError, asyncio.TimeoutError)):
+            fault = SessionFault.CONNECTION_TIMEOUT
+        elif self.app_state.session_status.phase == ConnectionPhase.CONNECTED:
+            fault = SessionFault.DISCONNECTED
+        else:
+            fault = SessionFault.CONNECTION_FAILED
+        self._show_notice(fault)
         return GLib.SOURCE_REMOVE
 
     def _on_auth_error(self) -> bool:
@@ -240,17 +304,25 @@ class TranscriptionManager:
 
     # --- Completion & Reset ---
 
-    def _schedule_error_reset(self) -> None:
-        """Keep one delayed error reset, owned by the current recording."""
-        if self.error_timer_id is not None:
-            GLib.source_remove(self.error_timer_id)
-        self.error_timer_id = GLib.timeout_add(
-            int(AUTH_EXPIRY_DELAY * 1000), self._on_error_timeout
+    def _show_notice(self, fault: SessionFault) -> None:
+        """Release resources now; a notice must not block the next recording."""
+        status = replace(
+            self.app_state.session_status,
+            phase=ConnectionPhase.CLOSED, phase_since=time.monotonic(), fault=fault,
+        )
+        self._release_session()
+        self.app_state.session_status = status
+        self.notice_timer_id = GLib.timeout_add(
+            int(SESSION_NOTICE_DURATION * 1000), self._dismiss_notice
         )
 
-    def _on_error_timeout(self) -> bool:
-        self.error_timer_id = None
-        return self._reset_to_idle()
+    def _dismiss_notice(self) -> bool:
+        self.notice_timer_id = None
+        self.app_state.session_status = SessionStatus()
+        self.app_state.transcription_text = ""
+        if self.on_overlay_hide:
+            self.on_overlay_hide()
+        return GLib.SOURCE_REMOVE
 
     def _clear_transcription_text(self) -> bool:
         self.clear_text_timer_id = None
@@ -262,7 +334,8 @@ class TranscriptionManager:
         for attr in (
             "quiet_timer_id",
             "safety_timer_id",
-            "error_timer_id",
+            "start_timer_id",
+            "notice_timer_id",
             "clear_text_timer_id",
         ):
             timer_id = getattr(self, attr)
@@ -273,11 +346,14 @@ class TranscriptionManager:
     def _complete_transcription(self) -> None:
         text = self.app_state.transcription_text.strip()
         logger.info("Completing transcription: '%s'", text[:50])
-        if text and self.on_paste:
+        if not text:
+            self._show_notice(SessionFault.NO_TEXT)
+            return
+        if self.on_paste:
             self.on_paste(text)
         self._reset_to_idle()
 
-    def _reset_to_idle(self) -> bool:
+    def _release_session(self) -> None:
         # Invalidate queued callbacks before stopping the resources that emit them.
         self._session = None
         self.awaiting_final_result = False
@@ -286,10 +362,14 @@ class TranscriptionManager:
         if self.asr_client:
             self.asr_client.disconnect()
         self._set_state(RecordingState.IDLE)
+        self.using_cached_params = False
+
+    def _reset_to_idle(self) -> bool:
+        self._release_session()
+        self.app_state.session_status = SessionStatus()
         self.app_state.error_message = None
         if self.on_overlay_hide:
             self.on_overlay_hide()
-        self.using_cached_params = False
         # Clear text after short delay
         self.clear_text_timer_id = GLib.timeout_add(
             200, self._clear_transcription_text
@@ -297,7 +377,10 @@ class TranscriptionManager:
         return GLib.SOURCE_REMOVE
 
     def handle_cancel(self) -> None:
-        if self.app_state.recording_state == RecordingState.IDLE:
+        if (
+            self.app_state.recording_state == RecordingState.IDLE
+            and self.notice_timer_id is None
+        ):
             return
         logger.info("Cancelling transcription")
         self._reset_to_idle()
@@ -305,7 +388,7 @@ class TranscriptionManager:
     def _handle_auth_failure(self) -> None:
         logger.warning("Auth failure, clearing cached params")
         ParamsStore.clear()
-        self._reset_to_idle()
+        self._show_notice(SessionFault.AUTH)
         self.app_state.login_status = LoginStatus.NOT_LOGGED_IN
         if self.on_auth_expired:
             self.on_auth_expired()
@@ -318,10 +401,8 @@ class TranscriptionManager:
     def _on_params_extracted(self, params: ASRParams | None) -> None:
         """Persist and connect only after the recording accepts this completion."""
         if params is None:
-            self.app_state.error_message = "无法获取连接参数，请重新登录"
+            self._show_notice(SessionFault.PARAMETERS)
         elif self.on_save_params is None or not self.on_save_params(params):
-            self.app_state.error_message = "无法保存登录凭证，请重试"
+            self._show_notice(SessionFault.CREDENTIAL_SAVE)
         else:
-            self.asr_client.connect(params)
-            return
-        self._schedule_error_reset()
+            self._connect(params)

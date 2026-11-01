@@ -10,8 +10,9 @@ pytest.importorskip("gi")
 
 from doubao_murmur import app as app_module, transcription
 from doubao_murmur.app_state import LoginStatus, RecordingState
-from doubao_murmur.config import AUTH_EXPIRY_DELAY
+from doubao_murmur.config import SESSION_NOTICE_DURATION
 from doubao_murmur.params_store import ASRParams, ParamsStore
+from doubao_murmur.session_status import SessionFault
 from doubao_murmur.ui import login_window as browser
 from tests.test_transcription import FakeGLib
 
@@ -354,8 +355,8 @@ def test_recording_fallback_saves_only_accepted_result_before_connecting(fallbac
         manager.asr_client.connect.assert_called_once_with(ParamsStore.load())
     else:
         manager.asr_client.connect.assert_not_called()
-        assert "保存" in app.app_state.error_message
-        glib.advance(int(AUTH_EXPIRY_DELAY * 1000))
+        assert app.app_state.session_status.fault == SessionFault.CREDENTIAL_SAVE
+        glib.advance(int(SESSION_NOTICE_DURATION * 1000))
         manager.audio_capture.stop.assert_called_once()
         assert app.app_state.recording_state == RecordingState.IDLE
     assert app.login_window.is_active  # Fallback extraction does not close login.
@@ -367,8 +368,6 @@ def test_invalidated_recording_fallback_completes_and_stops_microphone(fallback,
     app, glib = fallback
     login, view = app.login_window, app.login_window._webview
     manager = app.transcription_manager
-    schedule_reset = Mock(wraps=manager._schedule_error_reset)
-    monkeypatch.setattr(manager, "_schedule_error_reset", schedule_reset)
     save = Mock(wraps=ParamsStore.save)
     monkeypatch.setattr(ParamsStore, "save", save)
     manager.handle_start()
@@ -381,9 +380,7 @@ def test_invalidated_recording_fallback_completes_and_stops_microphone(fallback,
         app._do_logout()
     else:
         login.destroy()
-    assert app.app_state.error_message
-    schedule_reset.assert_called_once()
-    glib.advance(int(AUTH_EXPIRY_DELAY * 1000))
+    assert app.app_state.session_status.fault == SessionFault.PARAMETERS
     manager.audio_capture.stop.assert_called_once()
     assert app.app_state.recording_state == RecordingState.IDLE
 
@@ -394,7 +391,7 @@ def test_invalidated_recording_fallback_completes_and_stops_microphone(fallback,
         view.reply_params()
     login.destroy()
     glib.advance(5000)
-    schedule_reset.assert_called_once()
+    assert app.app_state.session_status.fault is None
     manager.audio_capture.stop.assert_called_once()
     manager.asr_client.connect.assert_not_called()
     save.assert_not_called()

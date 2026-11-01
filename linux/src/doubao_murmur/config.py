@@ -119,6 +119,8 @@ def save_recording_mode(mode: str) -> None:
 
 # --- Timeouts ---
 
+SESSION_START_TIMEOUT = 8.0  # total budget for params + WebSocket handshake
+SESSION_NOTICE_DURATION = 4.0  # keep diagnostics visible after releasing resources
 STOP_SAFETY_TIMEOUT = 1.5  # seconds; upper bound on waiting for final results
 # Trailing digital silence flushed when recording stops. The service emits one
 # result per audio message and withholds the last word until more audio arrives,
@@ -132,7 +134,6 @@ STOP_TRAILING_SILENCE_MS = 200
 FINAL_RESULT_QUIET_PERIOD = 0.25  # seconds
 DEBOUNCE_INTERVAL = 0.3  # seconds
 PASTE_DELAY = 0.05  # seconds between copy and paste simulation
-AUTH_EXPIRY_DELAY = 2.0  # seconds before resetting after auth error
 
 # --- Overlay UI ---
 

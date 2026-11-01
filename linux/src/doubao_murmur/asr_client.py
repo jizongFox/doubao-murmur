@@ -37,6 +37,10 @@ from doubao_murmur.params_store import ASRParams
 logger = logging.getLogger(__name__)
 
 
+class ASRServiceError(Exception):
+    """The service returned a non-authentication error, not a network failure."""
+
+
 class ASRClient:
     """WebSocket transport for one recording, including its buffered audio."""
 
@@ -50,6 +54,7 @@ class ASRClient:
         self._thread: threading.Thread | None = None
         self._task: asyncio.Task | None = None
         self._disconnect_requested = threading.Event()
+        self._terminal_reported = False
 
         # Callbacks (called from asyncio thread - must use GLib.idle_add for GTK)
         self.on_open = None  # () -> None
@@ -57,6 +62,8 @@ class ASRClient:
         self.on_finish = None  # () -> None
         self.on_error = None  # (error: Exception | None) -> None
         self.on_auth_error = None  # () -> None
+        self.on_response = None  # () -> None, valid results including empty text
+        self.on_close = None  # () -> None, peer closed without a finish/error event
 
     @property
     def is_connected(self) -> bool:
@@ -164,6 +171,8 @@ class ASRClient:
                         return
                     received_any = True
                     self._handle_message(message)
+                    if self._terminal_reported:
+                        break
 
                 # An expired login passes the handshake and is then closed by
                 # the server (1000) before it sends anything. A valid login
@@ -172,6 +181,7 @@ class ASRClient:
                 # closing, so our own closes never land here.
                 if (
                     not received_any
+                    and not self._terminal_reported
                     and not self._disconnect_requested.is_set()
                     and self._ws is ws
                     and getattr(ws, "close_code", None) == 1000
@@ -180,26 +190,37 @@ class ASRClient:
                         "Server closed the connection before sending "
                         "anything: login expired"
                     )
-                    self._connected = False
-                    if self.on_auth_error:
-                        self.on_auth_error()
+                    self._report_terminal(self.on_auth_error)
+                elif not self._terminal_reported:
+                    self._report_terminal(self.on_close)
             finally:
                 await ws.close()
 
         except Exception as e:
             if self._disconnect_requested.is_set():
                 return
-            if _is_connection_closed_error(e):
-                logger.warning("WebSocket closed: %s", e)
-                if self._connected:
-                    self._connected = False
-                    if self.on_error:
-                        self.on_error(e)
-            else:
-                logger.error("WebSocket error: %s", e)
-                self._connected = False
-                if self.on_error:
-                    self.on_error(e)
+            logger.warning("ASR transport error: %s", e)
+            self._report_terminal(self.on_error, e)
+
+    def _report_terminal(self, callback, *args) -> None:
+        """Send/receive failures race; only one terminal outcome may escape."""
+        with self._callback_lock:
+            if self._disconnect_requested.is_set() or self._terminal_reported:
+                return
+            self._terminal_reported = True
+            self._connected = False
+            if callback:
+                callback(*args)
+
+    async def _send(self, ws, data: bytes) -> None:
+        """Observe send failures instead of abandoning their Future exceptions."""
+        if self._disconnect_requested.is_set() or self._terminal_reported:
+            return
+        try:
+            await ws.send(data)
+        except Exception as error:
+            self._report_terminal(self.on_error, error)
+            self._cancel_connection()
 
     def _build_url(self, params: ASRParams) -> str:
         """Construct the full WSS URL with query parameters."""
@@ -218,7 +239,7 @@ class ASRClient:
             if self._connected and self._ws:
                 if self._loop and self._loop.is_running():
                     asyncio.run_coroutine_threadsafe(
-                        self._ws.send(data), self._loop
+                        self._send(self._ws, data), self._loop
                     )
             else:
                 self._pending_audio.append(data)
@@ -257,7 +278,7 @@ class ASRClient:
             if was_connected and ws:
                 if self._loop and self._loop.is_running():
                     for chunk in silence_chunks:
-                        asyncio.run_coroutine_threadsafe(ws.send(chunk), self._loop)
+                        asyncio.run_coroutine_threadsafe(self._send(ws, chunk), self._loop)
 
         logger.info(
             "Finished sending audio (+%dms silence), waiting for final results",
@@ -289,7 +310,7 @@ class ASRClient:
             for chunk in buffered:
                 if self._ws and self._loop and self._loop.is_running():
                     asyncio.run_coroutine_threadsafe(
-                        self._ws.send(chunk), self._loop
+                        self._send(self._ws, chunk), self._loop
                     )
 
     def _handle_message(self, message) -> None:
@@ -301,6 +322,8 @@ class ASRClient:
             data = json.loads(message)
         except json.JSONDecodeError:
             return
+        if not isinstance(data, dict) or self._terminal_reported:
+            return
 
         code = data.get("code", 0)
         event = data.get("event", "")
@@ -309,20 +332,29 @@ class ASRClient:
         # Detect auth errors
         if code != 0 and _is_auth_error(code, msg):
             logger.warning("Auth error detected: code=%s, message=%s", code, msg)
-            self._connected = False
-            if self.on_auth_error:
-                self.on_auth_error()
+            self._report_terminal(self.on_auth_error)
+            return
+
+        if code != 0:
+            self._report_terminal(self.on_error, ASRServiceError(f"ASR code {code}"))
             return
 
         if event == "result":
             result = data.get("result") or {}
+            if not isinstance(result, dict):
+                return
             text = result.get("Text", "")
+            if not isinstance(text, str):
+                return
+            if self.on_response:
+                self.on_response()
             if text and self.on_result:
                 self.on_result(text)
         elif event == "finish":
             logger.info("Received finish event")
-            if self.on_finish:
-                self.on_finish()
+            if self.on_response:
+                self.on_response()
+            self._report_terminal(self.on_finish)
 
 
 def _load_websockets():
@@ -345,10 +377,6 @@ def _websocket_header_kwargs(connect_func, headers: dict[str, str]) -> dict:
     if "additional_headers" in params:
         return {"additional_headers": headers}
     return {"extra_headers": headers}
-
-
-def _is_connection_closed_error(error: Exception) -> bool:
-    return error.__class__.__name__.startswith("ConnectionClosed")
 
 
 def _is_auth_error(code, message) -> bool:
