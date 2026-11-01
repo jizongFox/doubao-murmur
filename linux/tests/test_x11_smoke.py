@@ -35,6 +35,12 @@ def test_x11_components_start(tmp_path, monkeypatch):
         overlay.hide()
         assert listener.is_available(), "X server must expose RECORD"
         assert listener.start()
+        first_worker = listener._thread
+        assert listener.start()  # Recovery checks must not create duplicate workers.
+        assert listener._thread is first_worker
+        listener.stop()
+        assert not listener.is_running
+        assert listener.start()  # The same listener can recover after shutdown.
     finally:
         listener.stop()
         login.destroy()

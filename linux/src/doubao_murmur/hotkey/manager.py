@@ -1,12 +1,12 @@
 """Hotkey manager: coordinates input methods for triggering recording.
 
-Two backends, both started when available:
+Two backends, retried as the desktop session becomes ready:
 1. X11/XRecord (x11_listener) — preferred, and the only one that sees
    Steam Input's XTEST-injected controller keys.
 2. evdev /dev/input (evdev_listener) — needs the `input` group, plus
    --device=input when sandboxed. The only one that works on a Wayland
    session, where keys sent to native Wayland windows never reach
-    XWayland and are therefore invisible to XRecord.
+   XWayland and are therefore invisible to XRecord.
 """
 
 from __future__ import annotations
@@ -52,48 +52,52 @@ class HotkeyManager:
         self._hold_active = False
         self._last_hold_release_time = 0.0
         self._input_epoch: object | None = object()
+        self._retry_source: int | None = None
 
     def start(self, evdev_listener=None, x11_listener=None) -> None:
-        """Initialize input backends."""
+        """Own backend startup and recovery, including login-time failures."""
+        self.stop()
         self._input_epoch = object()
         self._evdev_listener = evdev_listener
         self._x11_listener = x11_listener
+        self._ensure_listeners()
+        if evdev_listener or x11_listener:
+            self._retry_source = GLib.timeout_add_seconds(5, self._ensure_listeners)
+            if not self.has_global_hotkey:
+                logger.warning("Hotkeys not ready; retrying every 5 seconds")
 
-        if self._x11_listener:
-            if self._x11_listener.start():
-                logger.info("X11 key listener active")
-            else:
-                logger.warning("X11 key listener failed to start")
-                self._x11_listener = None
-
-        # XRecord covers the whole X11 desktop; raw device access adds duplicate
-        # events there. Wayland still needs evdev alongside XWayland's XRecord.
-        if is_x11_session() and self._x11_listener is not None:
-            self._evdev_listener = None
-        if self._evdev_listener:
-            if self._evdev_listener.start():
-                logger.info("evdev listener active")
-            else:
-                logger.warning("evdev not available (need input group?)")
-                self._evdev_listener = None
+    def _ensure_listeners(self) -> bool:
+        native_x11 = is_x11_session()
+        for listener in (self._x11_listener, self._evdev_listener):
+            # Keep a healthy X11 backend, including an evdev fallback: switching
+            # listeners mid-press can lose the matching release. Wayland needs
+            # both XRecord and evdev to cover all focused applications.
+            if native_x11 and self.has_global_hotkey:
+                break
+            if listener is not None and not listener.is_running:
+                if listener.start():
+                    logger.info("%s active", type(listener).__name__)
+        return GLib.SOURCE_CONTINUE
 
     def stop(self) -> None:
         """Stop all input backends."""
         self._input_epoch = None
         self._hold_active = False
-        if self._x11_listener:
-            self._x11_listener.stop()
-        if self._evdev_listener:
-            self._evdev_listener.stop()
+        if self._retry_source is not None:
+            GLib.source_remove(self._retry_source)
+            self._retry_source = None
+        for listener in (self._x11_listener, self._evdev_listener):
+            if listener is not None and listener.is_running:
+                listener.stop()
         self._x11_listener = None
         self._evdev_listener = None
 
     @property
     def has_global_hotkey(self) -> bool:
         """True when a global hotkey backend is active."""
-        return (
-            self._evdev_listener is not None
-            or self._x11_listener is not None
+        return any(
+            listener is not None and listener.is_running
+            for listener in (self._evdev_listener, self._x11_listener)
         )
 
     def trigger_toggle(self) -> None:

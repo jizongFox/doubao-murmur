@@ -14,6 +14,7 @@ import os
 import select
 import struct
 import threading
+import time
 
 logger = logging.getLogger(__name__)
 
@@ -47,23 +48,31 @@ class EvdevListener:
                 fd = os.open(path, os.O_RDONLY | os.O_NONBLOCK)
                 os.close(fd)
                 return True
-            except PermissionError:
+            except OSError:
                 continue
         return False
 
     def start(self) -> bool:
         """Start listening. Returns False if no accessible devices."""
+        if self.is_running:
+            return True
         devices = self._find_keyboard_devices()
         if not devices:
-            logger.warning("No accessible evdev input devices found")
+            logger.debug("No accessible evdev input devices found")
             return False
 
+        self._right_alt_down = False
+        self._other_key_pressed = False
         self._running = True
         self._thread = threading.Thread(
             target=self._listen_loop, args=(devices,), daemon=True
         )
         self._thread.start()
         return True
+
+    @property
+    def is_running(self) -> bool:
+        return self._thread is not None and self._thread.is_alive()
 
     def stop(self) -> None:
         self._running = False
@@ -78,28 +87,36 @@ class EvdevListener:
                 fd = os.open(path, os.O_RDONLY | os.O_NONBLOCK)
                 os.close(fd)
                 accessible.append(path)
-            except PermissionError:
+            except OSError:
                 continue
         return accessible
 
-    def _listen_loop(self, devices: list[str]) -> None:
-        """Main read loop using select() for multiplexing."""
-        fds: dict[int, str] = {}
+    @staticmethod
+    def _open_devices(fds: dict[int, str], devices: list[str]) -> None:
         for path in devices:
+            if path in fds.values():
+                continue
             try:
                 fd = os.open(path, os.O_RDONLY | os.O_NONBLOCK)
                 fds[fd] = path
-            except Exception as e:
-                logger.warning("Cannot open %s: %s", path, e)
+            except OSError as e:
+                logger.debug("Cannot open %s: %s", path, e)
 
-        if not fds:
-            self._running = False
-            return
+    def _listen_loop(self, devices: list[str]) -> None:
+        """Read events and periodically add devices that became accessible."""
+        fds: dict[int, str] = {}
+        self._open_devices(fds, devices)
+        next_scan = time.monotonic() + 2.0
 
         buf_size = EVENT_SIZE * 16
 
         try:
-            while self._running and fds:
+            while self._running:
+                now = time.monotonic()
+                if now >= next_scan:
+                    self._open_devices(fds, sorted(glob.glob("/dev/input/event*")))
+                    next_scan = now + 2.0
+                # An empty fd list still waits; missing devices must not spin.
                 readable, _, _ = select.select(list(fds.keys()), [], [], 0.5)
                 for fd in readable:
                     try:

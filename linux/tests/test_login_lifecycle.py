@@ -477,6 +477,11 @@ def test_startup_and_recording_keep_first_and_return_login_paths(session, monkey
     monkeypatch.setattr(transcription, "ASRClient", Mock())
     app._setup_components()
     assert app.login_window is None
+    # Both availability probes above report False at login. Retain the backend
+    # candidates so HotkeyManager can retry after the session becomes ready.
+    backends = app.hotkey_manager.start.call_args.kwargs
+    assert isinstance(backends["x11_listener"], app_module.X11KeyListener)
+    assert isinstance(backends["evdev_listener"], app_module.EvdevListener)
     manager = app.transcription_manager
     manager.handle_start()
     if cached:
