@@ -81,6 +81,7 @@ class DoubaoMurmurApp(Gtk.Application):
         self.transcription_manager.on_auth_expired = self._on_auth_expired
         self.transcription_manager.on_show_login = self._show_login
         self.transcription_manager.on_paste = self._do_paste
+        self.transcription_manager.on_copy = self._do_copy
         self.transcription_manager.on_overlay_show = self._show_overlay
         self.transcription_manager.on_overlay_hide = self._hide_overlay
         self.transcription_manager.on_params_needed = self._extract_params
@@ -252,13 +253,20 @@ class DoubaoMurmurApp(Gtk.Application):
         if self.text_delivery:
             self.text_delivery.submit(text)
 
+    def _do_copy(self, text: str) -> None:
+        """Rescue interrupted speech without injecting a paste keystroke."""
+        if self.text_delivery:
+            self.text_delivery.submit(text, paste=False)
+
     def _on_delivery_complete(self, outcome: DeliveryOutcome) -> None:
         # Notifications do not take focus from the paste target or overwrite
         # recording state: another recording may already be underway.
         if outcome == DeliveryOutcome.PASTE_REQUESTED:
             logger.info("Text copied and paste keystroke requested")
             return
-        if outcome == DeliveryOutcome.COPIED_ONLY:
+        if outcome == DeliveryOutcome.COPIED:
+            message = "已识别的文字已复制到剪贴板，可手动粘贴（终端使用 Ctrl+Shift+V）。"
+        elif outcome == DeliveryOutcome.COPIED_ONLY:
             message = "文字已复制，但无法自动粘贴。请手动粘贴（终端使用 Ctrl+Shift+V）。"
         else:
             message = "无法复制识别结果，未发送粘贴按键。请检查剪贴板工具后重试。"

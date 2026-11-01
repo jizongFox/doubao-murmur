@@ -58,6 +58,7 @@ class TranscriptionManager:
         self.on_overlay_show = None  # () -> None
         self.on_overlay_hide = None  # () -> None
         self.on_paste = None  # (text: str) -> None
+        self.on_copy = None  # (text: str) -> None, interrupted recording only
         self.on_cancel_enabled_changed = None  # (enabled: bool) -> None
 
     def _wire_asr_callbacks(self, session: object) -> None:
@@ -306,6 +307,11 @@ class TranscriptionManager:
 
     def _show_notice(self, fault: SessionFault) -> None:
         """Release resources now; a notice must not block the next recording."""
+        # Snapshot the latest cumulative result before cleanup or a new session
+        # can clear it. Delivery owns the immutable text, not this session's UI.
+        text = self.app_state.transcription_text.strip()
+        if self._session is not None and text and self.on_copy:
+            self.on_copy(text)
         status = replace(
             self.app_state.session_status,
             phase=ConnectionPhase.CLOSED, phase_since=time.monotonic(), fault=fault,

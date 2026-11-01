@@ -20,6 +20,7 @@ logger = logging.getLogger(__name__)
 class DeliveryOutcome(Enum):
     # Injection success cannot establish whether the focused app accepted paste.
     PASTE_REQUESTED = "paste_requested"
+    COPIED = "copied"  # Intentional copy-only request completed.
     COPIED_ONLY = "copied_only"
     FAILED = "failed"
 
@@ -36,17 +37,17 @@ class TextDelivery:
 
     def __init__(self, on_result: Callable[[DeliveryOutcome], None]) -> None:
         self._on_result = on_result
-        self._queue: queue.Queue[str | None] = queue.Queue()
+        self._queue: queue.Queue[tuple[str, bool] | None] = queue.Queue()
         self._worker: threading.Thread | None = None
         self._closed = threading.Event()
         self._gtk_lock = threading.Lock()
         self._gtk_copy: Future[bool] | None = None
 
-    def submit(self, text: str) -> bool:
-        """Accept nonempty text immediately; outcomes arrive later on GTK."""
+    def submit(self, text: str, *, paste: bool = True) -> bool:
+        """Queue text; paste=False saves it without injecting keyboard input."""
         if not text or self._closed.is_set():
             return False
-        self._queue.put(text)
+        self._queue.put((text, paste))
         if self._worker is None:
             self._worker = threading.Thread(
                 target=self._run, name="text-delivery", daemon=True,
@@ -72,14 +73,15 @@ class TextDelivery:
 
     def _run(self) -> None:
         while True:
-            text = self._queue.get()
-            if text is None or self._closed.is_set():
+            request = self._queue.get()
+            if request is None or self._closed.is_set():
                 return
-            outcome = self._deliver(text)
+            text, paste = request
+            outcome = self._deliver(text, paste=paste)
             if not self._closed.is_set():
                 GLib.idle_add(self._notify, outcome)
 
-    def _deliver(self, text: str) -> DeliveryOutcome:
+    def _deliver(self, text: str, *, paste: bool) -> DeliveryOutcome:
         copied = False
         try:
             copied = PasteHelper.copy_to_clipboard(text, self._closed)
@@ -87,6 +89,8 @@ class TextDelivery:
                 copied = self._copy_on_gtk(text)
             if not copied:
                 return DeliveryOutcome.FAILED
+            if not paste:
+                return DeliveryOutcome.COPIED
             # Event.wait makes the usual copy/paste delay interruptible on quit.
             if self._closed.wait(PASTE_DELAY):
                 return DeliveryOutcome.COPIED_ONLY
