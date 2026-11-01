@@ -103,21 +103,19 @@ class DoubaoMurmurApp(Gtk.Application):
         # XTEST-injected ones (Steam Input desktop layouts inject
         # controller-mapped keys via XTEST, invisible to evdev).
         # Run evdev alongside X11: native Wayland windows bypass XRecord.
-        x11 = None
-        evdev = None
-        if X11KeyListener.is_available():
-            x11 = X11KeyListener(
-                on_record_press=self.hotkey_manager.trigger_record_press,
-                on_record_release=self.hotkey_manager.trigger_record_release,
-                on_escape=self.hotkey_manager.trigger_cancel,
-                on_keyboard=self.hotkey_manager.trigger_keyboard,
-            )
-        if EvdevListener.is_available():
-            evdev = EvdevListener(
-                on_record_press=self.hotkey_manager.trigger_record_press,
-                on_record_release=self.hotkey_manager.trigger_record_release,
-                on_escape=self.hotkey_manager.trigger_cancel,
-            )
+        # Keep both candidates: login-time availability is temporary, and the
+        # manager owns retries and the X11/Wayland backend policy.
+        x11 = X11KeyListener(
+            on_record_press=self.hotkey_manager.trigger_record_press,
+            on_record_release=self.hotkey_manager.trigger_record_release,
+            on_escape=self.hotkey_manager.trigger_cancel,
+            on_keyboard=self.hotkey_manager.trigger_keyboard,
+        )
+        evdev = EvdevListener(
+            on_record_press=self.hotkey_manager.trigger_record_press,
+            on_record_release=self.hotkey_manager.trigger_record_release,
+            on_escape=self.hotkey_manager.trigger_cancel,
+        )
 
         self.hotkey_manager.start(
             evdev_listener=evdev,

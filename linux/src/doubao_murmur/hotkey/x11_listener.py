@@ -73,6 +73,14 @@ class X11KeyListener:
 
     def start(self) -> bool:
         """Start listening. Returns False if setup fails."""
+        if self.is_running:
+            return True
+        if not os.environ.get("DISPLAY"):
+            return False
+        self._right_alt_down = False
+        self._other_key_pressed = False
+        self._chord_down.clear()
+        self._chord_fired = False
         try:
             from Xlib import XK
             from Xlib.display import Display
@@ -82,6 +90,9 @@ class X11KeyListener:
             self._ctrl_dpy = Display()
 
             self._kc_toggle = self._resolve_toggle_keycodes(XK)
+            if not self._kc_toggle:
+                self._cleanup()
+                return False
             self._kc_escape = self._ctrl_dpy.keysym_to_keycode(XK.XK_Escape)
             self._kc_ctrl_l = self._ctrl_dpy.keysym_to_keycode(XK.XK_Control_L)
             self._kc_ctrl_r = self._ctrl_dpy.keysym_to_keycode(XK.XK_Control_R)
@@ -110,7 +121,7 @@ class X11KeyListener:
                 ],
             )
         except Exception as e:
-            logger.warning("XRecord setup failed: %s", e)
+            logger.debug("XRecord setup failed: %s", e)
             self._cleanup()
             return False
 
@@ -120,6 +131,10 @@ class X11KeyListener:
         )
         self._thread.start()
         return True
+
+    @property
+    def is_running(self) -> bool:
+        return self._thread is not None and self._thread.is_alive()
 
     def _resolve_toggle_keycodes(self, XK) -> frozenset[int]:
         """Keycodes for the physical right Alt key.
@@ -193,6 +208,9 @@ class X11KeyListener:
         except Exception as e:
             if self._running:
                 logger.warning("XRecord loop ended: %s", e)
+        finally:
+            self._running = False
+            self._cleanup()
 
     def _on_record_reply(self, reply) -> None:
         from Xlib import X

@@ -40,8 +40,12 @@ def test_failed_device_is_removed_without_repolling(monkeypatch, error_code):
 
     def select_once(read_fds, write_fds, error_fds, timeout):
         polls.append(list(read_fds))
-        assert len(polls) == 1, "Failed device was polled again"
-        return read_fds, [], []
+        if len(polls) == 1:
+            return read_fds, [], []
+        assert not read_fds, "Failed device was polled again"
+        assert timeout >= 0.5, "An empty device set must wait before retrying"
+        listener._running = False
+        return [], [], []
 
     def read_failed(fd, size):
         if error_code is not None:
@@ -54,6 +58,7 @@ def test_failed_device_is_removed_without_repolling(monkeypatch, error_code):
     listener._listen_loop(["/dev/input/event-test"])
 
     assert closed == [101]
+    assert polls == [[101], []]
     assert not listener._running
     assert events == []
 
@@ -119,3 +124,69 @@ def test_transient_read_error_keeps_keyboard(monkeypatch, error_code, caplog):
     assert reads == [101, 101]
     assert flags_used[0] & os.O_NONBLOCK
     assert not caplog.records
+
+
+def test_keyboard_appearing_after_startup_is_added(monkeypatch):
+    listener, events = _listener()
+    opened, closed = [], []
+    device_fds = {"mouse": 101, "keyboard": 102}
+
+    def open_device(path, flags):
+        opened.append(path)
+        assert flags & os.O_NONBLOCK
+        return device_fds[path]
+
+    # A peripheral was readable at login; the actual keyboard appears later.
+    clock = iter([0.0, 2.0])
+    monkeypatch.setattr(evdev.time, "monotonic", lambda: next(clock))
+    monkeypatch.setattr(evdev.glob, "glob", lambda *_: ["mouse", "keyboard"])
+    monkeypatch.setattr(evdev.os, "open", open_device)
+    monkeypatch.setattr(evdev.os, "close", closed.append)
+    monkeypatch.setattr(evdev.os, "read", lambda *_: _keyboard_events())
+
+    def select_keyboard(read_fds, *_):
+        assert read_fds == [101, 102]
+        return [102], [], []
+
+    monkeypatch.setattr(evdev.select, "select", select_keyboard)
+    listener._listen_loop(["mouse"])
+
+    assert events == ["press", ("release", True)]
+    assert opened == ["mouse", "keyboard"]  # Existing devices stay open.
+    assert closed == [101, 102]
+
+
+def test_device_permissions_can_recover_without_restarting_app(monkeypatch):
+    listener, events = _listener()
+    closed, polls = [], []
+    ready = False
+    now = [0.0]
+
+    def open_device(path, flags):
+        if not ready:
+            raise PermissionError("Login device ACL not ready")
+        return 101
+
+    def select_device(read_fds, _, __, timeout):
+        nonlocal ready
+        polls.append(list(read_fds))
+        if not ready:
+            assert not read_fds and timeout >= 0.5
+            ready = True
+            now[0] = 2.0
+            return [], [], []
+        assert read_fds == [101]
+        return [101], [], []
+
+    monkeypatch.setattr(evdev.time, "monotonic", lambda: now[0])
+    monkeypatch.setattr(evdev.glob, "glob", lambda *_: ["keyboard"])
+    monkeypatch.setattr(evdev.os, "open", open_device)
+    monkeypatch.setattr(evdev.os, "close", closed.append)
+    monkeypatch.setattr(evdev.os, "read", lambda *_: _keyboard_events())
+    monkeypatch.setattr(evdev.select, "select", select_device)
+
+    listener._listen_loop(["keyboard"])
+
+    assert events == ["press", ("release", True)]
+    assert polls == [[], [101]]
+    assert closed == [101]
