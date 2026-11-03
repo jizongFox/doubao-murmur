@@ -307,10 +307,23 @@ Bluefin 等定制版默认带这个扩展。没有托盘时，再执行一次
   不把窗口后端误当作宿主会话。
 - 录音、ASR、凭证和配置文件不依赖发行版或桌面会话；WebKit 登录统一使用 GTK4 版 6.0。
 - `session_status.py`：不依赖 GTK 的不可变诊断快照，不复制录音状态。
-  `ASRClient` 只报告传输事实；`TranscriptionManager` 统一管理诊断、启动期限、
-  资源清理和提示保留；`AppState` 发布变化，`Overlay` 订阅并渲染。
-  停止发送音频不等于断开 WebSocket，不能用 `ASRClient.is_connected` 推导界面状态。
-  新增平台界面应消费这套状态契约，不新增网络状态管理器或按发行版分叉规则。
+  识别实现可提供诊断；`AppState` 发布变化，`Overlay` 订阅并渲染。
+
+### 接入一个识别后端
+
+- `recognition.py` 定义一次录音的接口：`start()` 准备识别，`send_audio(pcm)`
+  接收 16 kHz 单声道 PCM16 LE，`finish()` 结束音频输入，`close()` 取消并释放资源。
+  麦克风线程可能在 `start()` 前或准备期间送来音频；接收方法只做快速缓冲，
+  准备、推理和 I/O 由后端安排，状态和结果回调在 GTK 线程按顺序发出。
+- `TranscriptionManager` 管理麦克风、录音状态和交付。后端可以边录边报告
+  累计文本，也可以停录后一次报告结果；先报告最后的全文，再报告完成。
+  完成后按原规则粘贴；失败时保留已有文字到剪贴板；取消时丢弃旧回调。
+- `doubao_recognition.py` 管理豆包凭证、连接与收尾期限，复用
+  `asr_client.py` 的 WebSocket 和音频缓冲。停录前尚未连上时，保留已收音频。
+  本地实现可自行决定模型加载、推理时限和结果何时完成。
+- 后端选择集中在 `DoubaoMurmurApp._create_recognition_session()`。
+  新增本地实现时，在这里返回本地会话，再接入所需的设置入口。
+  默认仍为豆包在线识别；此处的接口不依赖具体本地模型或推理库。
 
 更改会话判定时测试 `test_desktop.py`；更改后端优先级时测试 hotkey / paste
 用例。真实 X11 启动检查单独在 Xvfb 中运行，避免单元测试读取键盘或注入按键。
@@ -323,6 +336,8 @@ linux/
 │   ├── app_state.py         # 应用状态管理
 │   ├── config.py            # 配置常量
 │   ├── asr_client.py        # WebSocket ASR 客户端
+│   ├── doubao_recognition.py # 豆包识别会话及策略
+│   ├── recognition.py       # 识别会话接口
 │   ├── audio_capture.py     # 麦克风音频采集
 │   ├── transcription.py     # 录音状态机
 │   ├── params_store.py      # 凭证持久化

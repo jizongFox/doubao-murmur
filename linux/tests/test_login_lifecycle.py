@@ -8,7 +8,7 @@ import pytest
 
 pytest.importorskip("gi")
 
-from doubao_murmur import app as app_module, transcription
+from doubao_murmur import app as app_module, doubao_recognition, transcription
 from doubao_murmur.app_state import LoginStatus, RecordingState
 from doubao_murmur.config import SESSION_NOTICE_DURATION
 from doubao_murmur.params_store import ASRParams, ParamsStore
@@ -329,8 +329,9 @@ def fallback(session, monkeypatch):
     monkeypatch.setattr(app_module.X11KeyListener, "is_available", lambda: False)
     monkeypatch.setattr(app_module.EvdevListener, "is_available", lambda: False)
     monkeypatch.setattr(transcription, "AudioCapture", Mock())
-    monkeypatch.setattr(transcription, "ASRClient", Mock())
+    monkeypatch.setattr(doubao_recognition, "ASRClient", Mock())
     monkeypatch.setattr(transcription, "GLib", glib)
+    monkeypatch.setattr(doubao_recognition, "GLib", glib)
     app._setup_components()
     app.app_state.login_status = LoginStatus.LOGGED_IN
     return app, glib
@@ -343,18 +344,19 @@ def test_recording_fallback_saves_only_accepted_result_before_connecting(fallbac
     save = Mock(wraps=ParamsStore.save) if save_succeeds else Mock(return_value=False)
     monkeypatch.setattr(ParamsStore, "save", save)
     manager.handle_start()
-    manager.asr_client.connect.side_effect = lambda params: (
+    client = doubao_recognition.ASRClient.return_value
+    client.connect.side_effect = lambda params: (
         pytest.fail("connected before saving") if ParamsStore.load() != params else None
     )
-    manager.asr_client.connect.assert_not_called()
+    client.connect.assert_not_called()
     view = app.login_window._webview
     view.reply_cookies()
     view.reply_params()
     save.assert_called_once()
     if save_succeeds:
-        manager.asr_client.connect.assert_called_once_with(ParamsStore.load())
+        client.connect.assert_called_once_with(ParamsStore.load())
     else:
-        manager.asr_client.connect.assert_not_called()
+        client.connect.assert_not_called()
         assert app.app_state.session_status.fault == SessionFault.CREDENTIAL_SAVE
         glib.advance(int(SESSION_NOTICE_DURATION * 1000))
         manager.audio_capture.stop.assert_called_once()
@@ -393,7 +395,7 @@ def test_invalidated_recording_fallback_completes_and_stops_microphone(fallback,
     glib.advance(5000)
     assert app.app_state.session_status.fault is None
     manager.audio_capture.stop.assert_called_once()
-    manager.asr_client.connect.assert_not_called()
+    doubao_recognition.ASRClient.return_value.connect.assert_not_called()
     save.assert_not_called()
     assert ParamsStore.load() is None
 
@@ -435,7 +437,7 @@ def test_close_to_hide_preserves_recording_fallback(fallback):
     assert app.app_state.error_message is None
     login._webview.reply_cookies()
     login._webview.reply_params()
-    manager.asr_client.connect.assert_called_once_with(ParamsStore.load())
+    doubao_recognition.ASRClient.return_value.connect.assert_called_once_with(ParamsStore.load())
     manager.audio_capture.stop.assert_not_called()
 
 
@@ -461,7 +463,7 @@ def test_real_store_reports_write_failure(monkeypatch):
 
 @pytest.mark.parametrize("cached", [False, True])
 def test_startup_and_recording_keep_first_and_return_login_paths(session, monkeypatch, cached):
-    app, _ = session
+    app, glib = session
     app.login_window.destroy()
     params = ASRParams({"sessionid": "test-only"}, "d", "w")
     if cached:
@@ -471,7 +473,8 @@ def test_startup_and_recording_keep_first_and_return_login_paths(session, monkey
     monkeypatch.setattr(app_module.X11KeyListener, "is_available", lambda: False)
     monkeypatch.setattr(app_module.EvdevListener, "is_available", lambda: False)
     monkeypatch.setattr(transcription, "AudioCapture", Mock())
-    monkeypatch.setattr(transcription, "ASRClient", Mock())
+    monkeypatch.setattr(doubao_recognition, "ASRClient", Mock())
+    monkeypatch.setattr(doubao_recognition, "GLib", glib)
     app._setup_components()
     assert app.login_window is None
     # Both availability probes above report False at login. Retain the backend
@@ -483,10 +486,10 @@ def test_startup_and_recording_keep_first_and_return_login_paths(session, monkey
     manager.handle_start()
     if cached:
         assert app.app_state.login_status == LoginStatus.LOGGED_IN
-        manager.asr_client.connect.assert_called_once_with(params)
+        doubao_recognition.ASRClient.return_value.connect.assert_called_once_with(params)
         assert app.login_window is None
     else:
         assert app.app_state.login_status == LoginStatus.NOT_LOGGED_IN
-        transcription.ASRClient.return_value.connect.assert_not_called()
+        doubao_recognition.ASRClient.return_value.connect.assert_not_called()
         manager.audio_capture.start.assert_not_called()
         assert app.login_window.is_active

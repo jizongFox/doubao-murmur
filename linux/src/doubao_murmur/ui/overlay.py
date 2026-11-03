@@ -75,6 +75,7 @@ _FAULT_TEXT = {
     SessionFault.DISCONNECTED: "识别连接已中断，请重试",
     SessionFault.SERVICE: "识别服务报错，请稍后重试",
     SessionFault.AUTH: "登录已失效，请重新登录",
+    SessionFault.RECOGNITION: "语音识别失败，请重试",
     SessionFault.NO_TEXT: "未收到识别文字，请检查麦克风或重试",
 }
 
