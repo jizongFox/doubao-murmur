@@ -299,7 +299,7 @@ def test_empty_text_and_close_before_first_submit_do_not_start_worker(delivery):
 
 @pytest.fixture
 def application(delivery, monkeypatch, tmp_path):
-    from doubao_murmur import app as app_module, transcription
+    from doubao_murmur import app as app_module, doubao_recognition, transcription
 
     d = delivery
     monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path))
@@ -310,10 +310,12 @@ def application(delivery, monkeypatch, tmp_path):
     monkeypatch.setattr(app_module.ParamsStore, "has_saved", lambda: True)
     monkeypatch.setattr(app_module.ParamsStore, "load", Mock())
     monkeypatch.setattr(transcription, "AudioCapture", Mock())
-    monkeypatch.setattr(transcription, "ASRClient", Mock())
+    monkeypatch.setattr(doubao_recognition, "ASRClient", Mock())
     # Use the existing deterministic recording timer fixture, not desktop timers.
     from tests.test_transcription import FakeGLib
-    monkeypatch.setattr(transcription, "GLib", FakeGLib())
+    glib = FakeGLib()
+    monkeypatch.setattr(transcription, "GLib", glib)
+    monkeypatch.setattr(doubao_recognition, "GLib", glib)
     app = app_module.DoubaoMurmurApp()
     monkeypatch.setattr(app, "send_notification", Mock())
     monkeypatch.setattr(app_module.Gio, "Notification", Mock())
@@ -334,6 +336,7 @@ def application(delivery, monkeypatch, tmp_path):
 
 
 def test_recording_cleans_up_while_delivery_is_still_blocked(application, delivery):
+    from doubao_murmur import doubao_recognition, transcription
     from doubao_murmur.app_state import RecordingState
 
     app, d = application, delivery
@@ -346,16 +349,19 @@ def test_recording_cleans_up_while_delivery_is_still_blocked(application, delive
 
     d.copy.side_effect = copy
     manager = app.transcription_manager
+    client = doubao_recognition.ASRClient.return_value
     try:
         manager.handle_start()
-        manager._on_asr_open()
+        client.on_open()
+        transcription.GLib.advance(0)
         manager.app_state.transcription_text = "finished transcript"
         manager.handle_stop()
-        manager._on_asr_finish()
+        client.on_finish()
+        transcription.GLib.advance(0)
         assert entered.wait(5)
 
         assert manager.app_state.recording_state == RecordingState.IDLE
-        manager.asr_client.disconnect.assert_called_once()
+        client.disconnect.assert_called_once()
         app.overlay.hide.assert_called_once()
         assert not d.outcomes
     finally:
@@ -368,10 +374,11 @@ def test_recording_cleans_up_while_delivery_is_still_blocked(application, delive
 def test_interrupted_transcript_survives_ui_clear_and_next_recording(
     application, delivery, ending
 ):
-    from doubao_murmur import app as app_module, transcription
+    from doubao_murmur import app as app_module, doubao_recognition, transcription
 
     app, d = application, delivery
     manager = app.transcription_manager
+    client = doubao_recognition.ASRClient.return_value
     entered, release = threading.Event(), threading.Event()
     clipboard = []
 
@@ -384,18 +391,20 @@ def test_interrupted_transcript_survives_ui_clear_and_next_recording(
     d.copy.side_effect = slow_copy
     try:
         manager.handle_start()
-        manager._on_asr_open()
-        manager._on_asr_result("earlier text")
-        manager._on_asr_result("latest text before disconnect")
+        client.on_open()
+        client.on_result("earlier text")
+        client.on_result("latest text before disconnect")
         if ending == "close":
-            manager._on_asr_close()
+            client.on_close()
         else:
-            manager._on_asr_error(OSError("connection reset"))
+            client.on_error(OSError("connection reset"))
+        transcription.GLib.advance(0)
         assert entered.wait(5)
         transcription.GLib.advance(int(transcription.SESSION_NOTICE_DURATION * 1000))
         assert manager.app_state.transcription_text == ""
         manager.handle_start()
-        manager._on_asr_result("new recording")
+        client.on_result("new recording")
+        transcription.GLib.advance(0)
     finally:
         release.set()
     d.gtk.until(lambda: d.outcomes)
