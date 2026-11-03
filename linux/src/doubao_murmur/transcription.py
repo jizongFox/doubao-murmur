@@ -58,7 +58,7 @@ class TranscriptionManager:
 
         session = self._create_session(RecognitionCallbacks(
             ready=current(self._on_ready),
-            status=current(lambda status: setattr(self.app_state, "session_status", status)),
+            progress=current(self._on_progress),
             result=current(lambda text: setattr(self.app_state, "transcription_text", text)),
             completed=current(self._complete_transcription),
             failed=current(self._show_notice),
@@ -106,6 +106,10 @@ class TranscriptionManager:
     def _on_ready(self) -> None:
         if self.app_state.recording_state == RecordingState.STARTING:
             self._set_state(RecordingState.RECORDING)
+
+    def _on_progress(self, status: SessionStatus) -> None:
+        # Only the terminal failure callback may publish a fault.
+        self.app_state.session_status = replace(status, fault=None)
 
     def _show_notice(self, fault: SessionFault) -> None:
         """Keep interrupted text without pasting it into the focused window."""
@@ -157,7 +161,10 @@ class TranscriptionManager:
         self._cancel_pending_timers()
         self.audio_capture.stop()
         if session is not None:
-            session.close()
+            try:
+                session.close()
+            except Exception:
+                logger.exception("Recognition cleanup failed")
         self._set_state(RecordingState.IDLE)
 
     def _reset_to_idle(self) -> None:

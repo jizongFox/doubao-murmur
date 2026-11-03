@@ -13,13 +13,14 @@ from doubao_murmur.session_status import SessionFault, SessionStatus
 class RecognitionCallbacks:
     """Notify the controller on the GTK thread, in order.
 
-    Report readiness once when preparation is complete, and optionally publish
-    diagnostics. Text updates replace the entire transcript; emit the last text
-    before completing. Report one terminal outcome: completed or failed.
+    Report readiness once when preparation is complete. Progress updates
+    carry diagnostics; any fault in a progress snapshot is ignored. Text
+    updates replace the entire transcript; emit the last text before
+    completing. Report one terminal outcome via completed or failed.
     """
 
     ready: Callable[[], None]
-    status: Callable[[SessionStatus], None]
+    progress: Callable[[SessionStatus], None]
     result: Callable[[str], None]
     completed: Callable[[], None]
     failed: Callable[[SessionFault], None]

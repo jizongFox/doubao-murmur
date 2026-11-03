@@ -91,7 +91,7 @@ class DoubaoRecognitionSession:
 
     def _set_phase(self, phase: ConnectionPhase) -> None:
         self._status = replace(self._status, phase=phase, phase_since=time.monotonic())
-        self._callbacks.status(self._status)
+        self._callbacks.progress(self._status)
 
     def send_audio(self, pcm: bytes) -> None:
         self._client.send_audio(pcm)
@@ -116,7 +116,7 @@ class DoubaoRecognitionSession:
 
     def _on_response(self) -> None:
         self._status = replace(self._status, last_response_at=time.monotonic())
-        self._callbacks.status(self._status)
+        self._callbacks.progress(self._status)
 
     def _on_result(self, text: str) -> None:
         self._callbacks.result(text)

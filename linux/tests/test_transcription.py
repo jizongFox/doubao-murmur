@@ -16,7 +16,7 @@ from doubao_murmur.doubao_recognition import (
     STOP_SAFETY_TIMEOUT,
     SESSION_START_TIMEOUT,
 )
-from doubao_murmur.session_status import ConnectionPhase, SessionFault
+from doubao_murmur.session_status import ConnectionPhase, SessionFault, SessionStatus
 from doubao_murmur.asr_client import ASRServiceError
 
 
@@ -690,3 +690,60 @@ def test_late_callbacks_from_a_cancelled_backend_cannot_end_next_recording(monke
     assert state.transcription_text == "current session"
     manager.on_copy.assert_not_called()
     manager.on_paste.assert_not_called()
+
+
+@pytest.mark.parametrize("ending", ["cancel", "failure"])
+def test_backend_close_error_leaves_recorder_ready_for_next_session(recording, ending):
+    manager, glib, clients = recording
+    state = manager.app_state
+    manager.on_cancel_enabled_changed = Mock()
+    manager.handle_start()
+    clients[0].disconnect.side_effect = RuntimeError("cleanup failed")
+
+    if ending == "cancel":
+        manager.handle_cancel()
+        manager.on_overlay_hide.assert_called_once()
+        manager.on_copy.assert_not_called()
+    else:
+        clients[0].on_open()
+        clients[0].on_result("partial transcript")
+        clients[0].on_error(ConnectionResetError("connection lost"))
+        glib.advance(0)
+        assert state.session_status.fault == SessionFault.DISCONNECTED
+        manager.on_copy.assert_called_once_with("partial transcript")
+
+    assert state.recording_state == RecordingState.IDLE
+    manager.audio_capture.stop.assert_called_once()
+    manager.on_cancel_enabled_changed.assert_called_with(False)
+    manager.on_paste.assert_not_called()
+    manager.handle_start()
+    assert state.recording_state == RecordingState.STARTING
+    assert len(clients) == 2
+    assert state.session_status.fault is None
+
+
+def test_only_failure_callback_ends_recording_and_sets_fault(monkeypatch):
+    monkeypatch.setattr(module, "GLib", FakeGLib())
+    monkeypatch.setattr(module, "AudioCapture", Mock())
+    state = AppState()
+    backend = Mock()
+    factory = Mock(return_value=backend)
+    manager = module.TranscriptionManager(state, factory)
+    manager.handle_start()
+    callbacks, = factory.call_args.args
+    callbacks.ready()
+
+    callbacks.progress(SessionStatus(
+        phase=ConnectionPhase.CONNECTED, phase_since=2.0, last_response_at=3.0,
+        fault=SessionFault.RECOGNITION,
+    ))
+    assert state.session_status == SessionStatus(
+        phase=ConnectionPhase.CONNECTED, phase_since=2.0, last_response_at=3.0,
+    )
+    assert state.recording_state == RecordingState.RECORDING
+    backend.close.assert_not_called()
+
+    callbacks.failed(SessionFault.RECOGNITION)
+    assert state.session_status.fault == SessionFault.RECOGNITION
+    assert state.recording_state == RecordingState.IDLE
+    backend.close.assert_called_once()
