@@ -139,7 +139,7 @@ class DoubaoMurmurApp(Gtk.Application):
         )
         self.tray_icon.start()
 
-        logger.info("All components initialized")
+        logger.info("All components initialized (recording mode=%s)", self.recording_mode)
 
     def _create_recognition_session(
         self, callbacks: RecognitionCallbacks
@@ -226,7 +226,7 @@ class DoubaoMurmurApp(Gtk.Application):
             return False
         self.app_state.error_message = None
         self.app_state.login_status = LoginStatus.LOGGED_IN
-        logger.info("Logged in as: %s", nickname)
+        logger.info("Doubao login accepted")
         return True
 
     @staticmethod

@@ -1,5 +1,6 @@
 """Opt-in real GTK/WebKit/XRecord check; run only in an isolated Xvfb server."""
 
+import logging
 import os
 
 import pytest
@@ -10,7 +11,7 @@ pytestmark = pytest.mark.skipif(
 )
 
 
-def test_x11_components_start(tmp_path, monkeypatch):
+def test_x11_components_start(tmp_path, monkeypatch, caplog):
     monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path))
     import gi
 
@@ -31,8 +32,12 @@ def test_x11_components_start(tmp_path, monkeypatch):
         login._setup()  # Create the real WebView, but never load doubao.com.
         assert login.is_active
         overlay = Overlay(state)
-        overlay.show()
-        overlay.hide()
+        with caplog.at_level(logging.INFO, logger="doubao_murmur.ui.overlay"):
+            overlay.show()
+            overlay.hide()
+        assert "Recording overlay mapped" in caplog.text
+        assert "Recording overlay hide requested" in caplog.text
+        assert "Recording overlay unmapped" in caplog.text
         assert listener.is_available(), "X server must expose RECORD"
         assert listener.start()
         first_worker = listener._thread

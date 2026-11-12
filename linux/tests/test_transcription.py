@@ -17,7 +17,7 @@ from doubao_murmur.doubao_recognition import (
     SESSION_START_TIMEOUT,
 )
 from doubao_murmur.session_status import ConnectionPhase, SessionFault, SessionStatus
-from doubao_murmur.asr_client import ASRServiceError
+from doubao_murmur.asr_client import ASRResponseTimeout, ASRServiceError
 
 
 class FakeGLib:
@@ -538,7 +538,7 @@ def test_unexpected_peer_close_preserves_partial_text_without_pasting(recording)
     cloud.ParamsStore.clear.assert_not_called()
 
 
-@pytest.mark.parametrize("ending", ["close", "network", "timeout", "service", "auth"])
+@pytest.mark.parametrize("ending", ["close", "network", "timeout", "response_timeout", "service", "auth"])
 def test_failed_session_copies_latest_result_once_before_cleanup(recording, ending):
     manager, glib, clients = recording
     manager.handle_start()
@@ -561,6 +561,7 @@ def test_failed_session_copies_latest_result_once_before_cleanup(recording, endi
         error = {
             "network": OSError("connection reset"),
             "timeout": TimeoutError("connection timed out"),
+            "response_timeout": ASRResponseTimeout(),
             "service": ASRServiceError("service stopped"),
         }[ending]
         client.on_error(error)
@@ -573,6 +574,8 @@ def test_failed_session_copies_latest_result_once_before_cleanup(recording, endi
     manager.on_paste.assert_not_called()
     client.disconnect.assert_called_once()
     assert manager.app_state.recording_state == RecordingState.IDLE
+    if ending == "response_timeout":
+        assert manager.app_state.session_status.fault == SessionFault.RESPONSE_TIMEOUT
     glib.advance(int(SESSION_NOTICE_DURATION * 1000))
     assert manager.app_state.transcription_text == ""
     manager.on_copy.assert_called_once()

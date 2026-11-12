@@ -10,7 +10,9 @@ from dataclasses import replace
 
 from gi.repository import GLib
 
-from doubao_murmur.asr_client import ASRClient, ASRServiceError, is_handshake_auth_rejection
+from doubao_murmur.asr_client import (
+    ASRClient, ASRResponseTimeout, ASRServiceError, is_handshake_auth_rejection,
+)
 from doubao_murmur.params_store import ASRParams, ParamsStore
 from doubao_murmur.recognition import RecognitionCallbacks
 from doubao_murmur.session_status import ConnectionPhase, SessionFault, SessionStatus
@@ -142,6 +144,7 @@ class DoubaoRecognitionSession:
 
     def _finish_after_timeout(self) -> bool:
         self._stop_timer = None
+        logger.info("ASR final result timed out after stop")
         self._callbacks.completed()
         return GLib.SOURCE_REMOVE
 
@@ -162,12 +165,14 @@ class DoubaoRecognitionSession:
             self._callbacks.failed(SessionFault.DISCONNECTED)
 
     def _on_error(self, error: Exception) -> None:
-        logger.error("ASR error: %s", error)
+        logger.error("ASR error: %s", type(error).__name__)
         if self._using_cached_params and is_handshake_auth_rejection(error):
             self._auth_failed()
             return
         if isinstance(error, ASRServiceError):
             fault = SessionFault.SERVICE
+        elif isinstance(error, ASRResponseTimeout):
+            fault = SessionFault.RESPONSE_TIMEOUT
         elif isinstance(error, (TimeoutError, asyncio.TimeoutError)):
             fault = SessionFault.CONNECTION_TIMEOUT
         elif self._status.phase == ConnectionPhase.CONNECTED:

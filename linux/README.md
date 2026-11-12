@@ -373,6 +373,24 @@ rm ~/.config/doubao-murmur/asr_params.json
 
 ## ❓ 常见问题
 
+### 查看录音和悬浮窗日志
+
+每次启动会在 `~/.local/state/doubao-murmur/logs/` 生成一份 `run-*.log`。
+如果设置了 `XDG_STATE_HOME`，则使用该目录下的 `doubao-murmur/logs/`。
+同一进程连续运行满 48 小时后，下一条日志会写入新文件；旧日志会保留。
+Flatpak 1.13 及更新版本的日志位于
+`~/.var/app/com.doubao.Murmur/.local/state/doubao-murmur/logs/`。
+
+若录音中悬浮窗突然消失，请记录当时的时间，查看日志中前后的
+`Recording state`、`Recognition fault` 和 `Recording overlay`。
+遇到断线时，`ASR WebSocket closed` 记录关闭方向、收发关闭码及是否检测到本地心跳超时；
+`ASR connection summary` 记录连接时长、收发数量和最后一条消息距结束的时间。
+日志记录状态和错误，不记录识别内容或登录凭证。
+
+豆包录音连接每 20 秒发送一次 Ping，但不会因未收到 Pong 而中断录音。
+开始发送音频后，连续 30 秒没有收到任何识别服务消息才提示响应超时，
+并将已识别文字复制到剪贴板。手动停录后仍按原流程等待最终结果。
+
 ### 启动后什么都没出现
 - 已登录时应用驻留系统托盘，查看右下角是否有 🎤 图标，按右 Alt 即可录音
 - 点击托盘图标或再启动一次应用（单实例）可打开控制面板

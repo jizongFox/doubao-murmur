@@ -5,11 +5,14 @@ Mirrors AppState.swift.
 
 from __future__ import annotations
 
+import logging
 from enum import Enum
 
 from gi.repository import GLib, GObject
 
 from doubao_murmur.session_status import SessionStatus
+
+logger = logging.getLogger(__name__)
 
 
 class LoginStatus(Enum):
@@ -51,6 +54,10 @@ class AppState(GObject.Object):
     @session_status.setter
     def session_status(self, value: SessionStatus) -> None:
         if value != self._session_status:
+            if value.phase != self._session_status.phase:
+                logger.info("Recognition phase: %s", value.phase.value)
+            if value.fault is not None and value.fault != self._session_status.fault:
+                logger.warning("Recognition fault: %s", value.fault.value)
             self._session_status = value
             self.emit("session-status-changed")
 
@@ -71,6 +78,7 @@ class AppState(GObject.Object):
     @recording_state.setter
     def recording_state(self, value: RecordingState) -> None:
         if value != self._recording_state:
+            logger.info("Recording state: %s -> %s", self._recording_state.value, value.value)
             self._recording_state = value
             self.emit("recording-state-changed", value.value)
 
