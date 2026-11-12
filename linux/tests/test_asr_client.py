@@ -348,6 +348,44 @@ class TestServerClose:
         assert received == [b"speech", bytes(3200), bytes(3200)]
         assert fired == ["open", ("result", "短句"), "close"]
 
+    @pytest.mark.parametrize("stop", [False, True])
+    def test_buffered_audio_precedes_live_audio_or_stop_padding(
+        self, client, sample_params, monkeypatch, stop
+    ):
+        received = []
+        connected, resume = threading.Event(), threading.Event()
+        log_info = asr_client_module.logger.info
+
+        def pause_at_connection(message, *args):
+            if message.startswith("ASR connected:"):
+                connected.set()
+                assert resume.wait(5)
+            log_info(message, *args)
+
+        async def handler(ws):
+            for _ in range(2):
+                received.append(await ws.recv())
+            await ws.send(json.dumps({"event": "finish"}))
+            await ws.wait_closed()
+
+        monkeypatch.setattr(asr_client_module.logger, "info", pause_at_connection)
+        client.send_audio(b"buffered")
+        with local_asr_server(handler) as url:
+            monkeypatch.setattr(asr_client_module, "WSS_BASE_URL", url)
+            client.connect(sample_params)
+            try:
+                assert connected.wait(5)
+                if stop:
+                    client.finish_sending(trailing_silence_ms=100)
+                else:
+                    client.send_audio(b"live")
+            finally:
+                resume.set()
+            client._thread.join(5)
+            assert not client._thread.is_alive()
+
+        assert received == [b"buffered", bytes(3200) if stop else b"live"]
+
     def test_finish_then_close_reports_one_terminal_outcome(self, recorder, sample_params):
         async def handler(ws):
             await ws.send(json.dumps({"code": 0, "event": "finish"}))
@@ -692,7 +730,14 @@ class TestConnectionLifetime:
             asr_client_module, "_load_websockets",
             lambda: SimpleNamespace(connect=connect),
         )
-        monkeypatch.setattr(client, "_flush_audio_buffer", client.disconnect)
+        publish_socket = client._publish_socket
+
+        def cancel_after_publish(socket):
+            count = publish_socket(socket)
+            client.disconnect()
+            return count
+
+        monkeypatch.setattr(client, "_publish_socket", cancel_after_publish)
 
         client.connect(sample_params)
         client._thread.join(5)

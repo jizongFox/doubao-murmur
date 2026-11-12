@@ -68,7 +68,7 @@ class DoubaoMurmurApp(Gtk.Application):
 
     def _setup_components(self) -> None:
         # 1. Check for cached params
-        if ParamsStore.has_saved():
+        if ParamsStore.load() is not None:
             self.app_state.login_status = LoginStatus.LOGGED_IN
             logger.info("Cached params found, skipping WebView")
         else:
@@ -148,8 +148,14 @@ class DoubaoMurmurApp(Gtk.Application):
         if self.app_state.login_status != LoginStatus.LOGGED_IN:
             self._show_login()
             return None
+        cached_params = ParamsStore.load()
+        if cached_params is None and not (self.login_window and self.login_window.is_active):
+            self._on_login_required()
+            self._show_login()
+            return None
         return DoubaoRecognitionSession(
             callbacks,
+            cached_params=cached_params,
             extract_params=self._extract_params,
             save_params=self._save_params,
             on_auth_expired=self._on_auth_expired,

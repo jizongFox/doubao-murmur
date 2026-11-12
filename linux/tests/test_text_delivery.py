@@ -307,7 +307,6 @@ def application(delivery, monkeypatch, tmp_path):
         monkeypatch.setattr(app_module, name, Mock())
     monkeypatch.setattr(app_module.X11KeyListener, "is_available", lambda: False)
     monkeypatch.setattr(app_module.EvdevListener, "is_available", lambda: False)
-    monkeypatch.setattr(app_module.ParamsStore, "has_saved", lambda: True)
     monkeypatch.setattr(app_module.ParamsStore, "load", Mock())
     monkeypatch.setattr(transcription, "AudioCapture", Mock())
     monkeypatch.setattr(doubao_recognition, "ASRClient", Mock())
@@ -361,6 +360,8 @@ def test_recording_cleans_up_while_delivery_is_still_blocked(application, delive
         assert entered.wait(5)
 
         assert manager.app_state.recording_state == RecordingState.IDLE
+        assert manager.app_state.transcription_text == ""
+        assert d.copy.call_args.args[0] == "finished transcript"
         client.disconnect.assert_called_once()
         app.overlay.hide.assert_called_once()
         assert not d.outcomes

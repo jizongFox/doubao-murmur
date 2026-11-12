@@ -169,11 +169,9 @@ class ASRClient:
             except TypeError:
                 ws = await websockets.connect(url, **connect_kwargs)
             try:
-                with self._lock:
-                    if self._disconnect_requested.is_set():
-                        return
-                    self._ws = ws
-                    self._connected = True
+                buffered_count = self._publish_socket(ws)
+                if buffered_count is None:
+                    return
                 self._connected_at = time.monotonic()
                 logger.info(
                     "ASR connected: handshake_s=%s ping_interval_s=%s ping_timeout_s=%s",
@@ -181,8 +179,8 @@ class ASRClient:
                     getattr(ws, "ping_interval", None), getattr(ws, "ping_timeout", None),
                 )
 
-                # Flush buffered audio
-                self._flush_audio_buffer()
+                if buffered_count:
+                    logger.info("Flushing %d buffered audio chunks", buffered_count)
 
                 # disconnect() can race with the post-handshake setup above.
                 # Do not announce a connection that was cancelled meanwhile.
@@ -287,11 +285,8 @@ class ASRClient:
         with self._lock:
             if self._disconnect_requested.is_set():
                 return
-            if self._connected and self._ws:
-                if self._loop and self._loop.is_running():
-                    asyncio.run_coroutine_threadsafe(
-                        self._send(self._ws, data), self._loop
-                    )
+            if self._connected and self._ws is not None:
+                self._queue_audio_locked(self._ws, data)
             else:
                 self._pending_audio.append(data)
 
@@ -317,20 +312,17 @@ class ASRClient:
             if self._disconnect_requested.is_set():
                 return
             self._input_ended.set()
-            ws = self._ws
-            was_connected = self._connected
+            ws = self._ws if self._connected else None
             self._connected = False
 
             # If the user stops before the handshake completes, keep the
             # captured speech and queue the same tail used by the connected
-            # path. _flush_audio_buffer() will send both in order on connect.
-            if not was_connected:
+            # path. The connection handoff will queue both in order.
+            if ws is None:
                 self._pending_audio.extend(silence_chunks)
-
-            if was_connected and ws:
-                if self._loop and self._loop.is_running():
-                    for chunk in silence_chunks:
-                        asyncio.run_coroutine_threadsafe(self._send(ws, chunk), self._loop)
+            else:
+                for chunk in silence_chunks:
+                    self._queue_audio_locked(ws, chunk)
 
         logger.info(
             "Finished sending audio (+%dms silence), waiting for final results",
@@ -353,17 +345,22 @@ class ASRClient:
                     self._loop.call_soon_threadsafe(self._cancel_connection)
         logger.info("Disconnected")
 
-    def _flush_audio_buffer(self) -> None:
+    def _publish_socket(self, ws) -> int | None:
+        """Queue buffered audio before other threads can route audio to the socket."""
         with self._lock:
-            buffered = list(self._pending_audio)
-            self._pending_audio.clear()
-        if buffered:
-            logger.info("Flushing %d buffered audio chunks", len(buffered))
+            if self._disconnect_requested.is_set():
+                return None
+            buffered, self._pending_audio = self._pending_audio, []
             for chunk in buffered:
-                if self._ws and self._loop and self._loop.is_running():
-                    asyncio.run_coroutine_threadsafe(
-                        self._send(self._ws, chunk), self._loop
-                    )
+                self._queue_audio_locked(ws, chunk)
+            self._ws = ws
+            self._connected = True
+            return len(buffered)
+
+    def _queue_audio_locked(self, ws, chunk: bytes) -> None:
+        """Schedule a send under the routing lock; the socket I/O runs on asyncio."""
+        if self._loop and self._loop.is_running():
+            asyncio.run_coroutine_threadsafe(self._send(ws, chunk), self._loop)
 
     def _handle_message(self, message) -> None:
         """Parse JSON message from server."""

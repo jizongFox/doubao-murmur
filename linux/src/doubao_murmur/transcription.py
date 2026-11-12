@@ -26,7 +26,6 @@ class TranscriptionManager:
         self._session: RecognitionSession | None = None
         self.audio_capture = AudioCapture()
         self.notice_timer_id: int | None = None
-        self.clear_text_timer_id: int | None = None
 
         # Callbacks set by app.py
         self.on_overlay_show = None  # () -> None
@@ -66,7 +65,7 @@ class TranscriptionManager:
         if session is None:
             return
 
-        self._cancel_pending_timers()
+        self._cancel_notice_timer()
         self._session = session
         self._set_state(RecordingState.STARTING)
         self.app_state.transcription_text = ""
@@ -134,17 +133,10 @@ class TranscriptionManager:
             self.on_overlay_hide()
         return GLib.SOURCE_REMOVE
 
-    def _clear_transcription_text(self) -> bool:
-        self.clear_text_timer_id = None
-        self.app_state.transcription_text = ""
-        return GLib.SOURCE_REMOVE
-
-    def _cancel_pending_timers(self) -> None:
-        for attr in ("notice_timer_id", "clear_text_timer_id"):
-            timer_id = getattr(self, attr)
-            if timer_id is not None:
-                GLib.source_remove(timer_id)
-                setattr(self, attr, None)
+    def _cancel_notice_timer(self) -> None:
+        if self.notice_timer_id is not None:
+            GLib.source_remove(self.notice_timer_id)
+            self.notice_timer_id = None
 
     def _complete_transcription(self) -> None:
         text = self.app_state.transcription_text.strip()
@@ -159,7 +151,7 @@ class TranscriptionManager:
     def _release_session(self) -> None:
         # Invalidate callbacks before stopping the resources that emit them.
         session, self._session = self._session, None
-        self._cancel_pending_timers()
+        self._cancel_notice_timer()
         self.audio_capture.stop()
         if session is not None:
             try:
@@ -174,9 +166,7 @@ class TranscriptionManager:
         self.app_state.error_message = None
         if self.on_overlay_hide:
             self.on_overlay_hide()
-        self.clear_text_timer_id = GLib.timeout_add(
-            200, self._clear_transcription_text
-        )
+        self.app_state.transcription_text = ""
 
     def handle_cancel(self) -> None:
         if self._session is not None or self.notice_timer_id is not None:
