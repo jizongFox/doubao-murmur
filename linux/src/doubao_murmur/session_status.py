@@ -1,6 +1,6 @@
 """UI-independent diagnostics for one voice session.
 
-The transcription manager publishes immutable snapshots on the main thread.
+The active backend reports diagnostics; the controller publishes snapshots on GTK.
 Times use a monotonic clock; absent responses do not imply a broken network.
 Recording controls remain governed by RecordingState, not these diagnostics.
 """
@@ -23,10 +23,12 @@ class SessionFault(Enum):
     CREDENTIAL_SAVE = "credential_save"
     PARAMETER_TIMEOUT = "parameter_timeout"
     CONNECTION_TIMEOUT = "connection_timeout"
+    RESPONSE_TIMEOUT = "response_timeout"
     CONNECTION_FAILED = "connection_failed"
     DISCONNECTED = "disconnected"
     SERVICE = "service"
     AUTH = "auth"
+    RECOGNITION = "recognition"
     NO_TEXT = "no_text"
 
 

@@ -307,10 +307,24 @@ Bluefin 等定制版默认带这个扩展。没有托盘时，再执行一次
   不把窗口后端误当作宿主会话。
 - 录音、ASR、凭证和配置文件不依赖发行版或桌面会话；WebKit 登录统一使用 GTK4 版 6.0。
 - `session_status.py`：不依赖 GTK 的不可变诊断快照，不复制录音状态。
-  `ASRClient` 只报告传输事实；`TranscriptionManager` 统一管理诊断、启动期限、
-  资源清理和提示保留；`AppState` 发布变化，`Overlay` 订阅并渲染。
-  停止发送音频不等于断开 WebSocket，不能用 `ASRClient.is_connected` 推导界面状态。
-  新增平台界面应消费这套状态契约，不新增网络状态管理器或按发行版分叉规则。
+  识别实现可提供诊断；`AppState` 发布变化，`Overlay` 订阅并渲染。
+
+### 接入一个识别后端
+
+- `recognition.py` 定义一次录音的接口：`start()` 准备识别，`send_audio(pcm)`
+  接收 16 kHz 单声道 PCM16 LE，`finish()` 结束音频输入，`close()` 取消并释放资源。
+  麦克风线程可能在 `start()` 前或准备期间送来音频；接收方法只做快速缓冲，
+  准备、推理和 I/O 由后端安排，进度和结果回调在 GTK 线程按顺序发出。
+  `progress()` 只更新诊断，识别失败通过 `failed()` 结束会话。
+- `TranscriptionManager` 管理麦克风、录音状态和交付。后端可以边录边报告
+  累计文本，也可以停录后一次报告结果；先报告最后的全文，再报告完成。
+  完成后按原规则粘贴；失败时保留已有文字到剪贴板；取消时丢弃旧回调。
+- `doubao_recognition.py` 管理豆包凭证、连接与收尾期限，复用
+  `asr_client.py` 的 WebSocket 和音频缓冲。停录前尚未连上时，保留已收音频。
+  本地实现可自行决定模型加载、推理时限和结果何时完成。
+- 后端选择集中在 `DoubaoMurmurApp._create_recognition_session()`。
+  新增本地实现时，在这里返回本地会话，再接入所需的设置入口。
+  默认仍为豆包在线识别；此处的接口不依赖具体本地模型或推理库。
 
 更改会话判定时测试 `test_desktop.py`；更改后端优先级时测试 hotkey / paste
 用例。真实 X11 启动检查单独在 Xvfb 中运行，避免单元测试读取键盘或注入按键。
@@ -323,6 +337,8 @@ linux/
 │   ├── app_state.py         # 应用状态管理
 │   ├── config.py            # 配置常量
 │   ├── asr_client.py        # WebSocket ASR 客户端
+│   ├── doubao_recognition.py # 豆包识别会话及策略
+│   ├── recognition.py       # 识别会话接口
 │   ├── audio_capture.py     # 麦克风音频采集
 │   ├── transcription.py     # 录音状态机
 │   ├── params_store.py      # 凭证持久化
@@ -356,6 +372,24 @@ rm ~/.config/doubao-murmur/asr_params.json
 ```
 
 ## ❓ 常见问题
+
+### 查看录音和悬浮窗日志
+
+每次启动会在 `~/.local/state/doubao-murmur/logs/` 生成一份 `run-*.log`。
+如果设置了 `XDG_STATE_HOME`，则使用该目录下的 `doubao-murmur/logs/`。
+同一进程连续运行满 48 小时后，下一条日志会写入新文件；旧日志会保留。
+Flatpak 1.13 及更新版本的日志位于
+`~/.var/app/com.doubao.Murmur/.local/state/doubao-murmur/logs/`。
+
+若录音中悬浮窗突然消失，请记录当时的时间，查看日志中前后的
+`Recording state`、`Recognition fault` 和 `Recording overlay`。
+遇到断线时，`ASR WebSocket closed` 记录关闭方向、收发关闭码及是否检测到本地心跳超时；
+`ASR connection summary` 记录连接时长、收发数量和最后一条消息距结束的时间。
+日志记录状态和错误，不记录识别内容或登录凭证。
+
+豆包录音连接每 20 秒发送一次 Ping，但不会因未收到 Pong 而中断录音。
+开始发送音频后，连续 30 秒没有收到任何识别服务消息才提示响应超时，
+并将已识别文字复制到剪贴板。手动停录后仍按原流程等待最终结果。
 
 ### 启动后什么都没出现
 - 已登录时应用驻留系统托盘，查看右下角是否有 🎤 图标，按右 Alt 即可录音

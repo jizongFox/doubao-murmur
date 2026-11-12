@@ -18,12 +18,14 @@ from doubao_murmur.config import (
     load_recording_mode,
     save_recording_mode,
 )
+from doubao_murmur.doubao_recognition import DoubaoRecognitionSession
 from doubao_murmur.hotkey.evdev_listener import EvdevListener
 from doubao_murmur.hotkey.manager import HotkeyManager
 from doubao_murmur.hotkey.x11_listener import X11KeyListener
 from doubao_murmur.keyboard.keyboard_window import KeyboardWindow
 from doubao_murmur.params_store import ParamsStore
 from doubao_murmur.paste.delivery import DeliveryOutcome, TextDelivery
+from doubao_murmur.recognition import RecognitionCallbacks, RecognitionSession
 from doubao_murmur.transcription import TranscriptionManager
 from doubao_murmur.ui.login_window import LoginWindow
 from doubao_murmur.ui.overlay import Overlay
@@ -77,15 +79,13 @@ class DoubaoMurmurApp(Gtk.Application):
 
         # 3. Create transcription manager
         self.text_delivery = TextDelivery(on_result=self._on_delivery_complete)
-        self.transcription_manager = TranscriptionManager(self.app_state)
-        self.transcription_manager.on_auth_expired = self._on_auth_expired
-        self.transcription_manager.on_show_login = self._show_login
+        self.transcription_manager = TranscriptionManager(
+            self.app_state, self._create_recognition_session
+        )
         self.transcription_manager.on_paste = self._do_paste
         self.transcription_manager.on_copy = self._do_copy
         self.transcription_manager.on_overlay_show = self._show_overlay
         self.transcription_manager.on_overlay_hide = self._hide_overlay
-        self.transcription_manager.on_params_needed = self._extract_params
-        self.transcription_manager.on_save_params = self._save_params
         self.transcription_manager.on_cancel_enabled_changed = (
             self._on_cancel_enabled_changed
         )
@@ -139,7 +139,21 @@ class DoubaoMurmurApp(Gtk.Application):
         )
         self.tray_icon.start()
 
-        logger.info("All components initialized")
+        logger.info("All components initialized (recording mode=%s)", self.recording_mode)
+
+    def _create_recognition_session(
+        self, callbacks: RecognitionCallbacks
+    ) -> RecognitionSession | None:
+        """Compose the selected backend and its prerequisites in one place."""
+        if self.app_state.login_status != LoginStatus.LOGGED_IN:
+            self._show_login()
+            return None
+        return DoubaoRecognitionSession(
+            callbacks,
+            extract_params=self._extract_params,
+            save_params=self._save_params,
+            on_auth_expired=self._on_auth_expired,
+        )
 
     def _reset_overlay_position(self) -> None:
         if self.overlay:
@@ -212,7 +226,7 @@ class DoubaoMurmurApp(Gtk.Application):
             return False
         self.app_state.error_message = None
         self.app_state.login_status = LoginStatus.LOGGED_IN
-        logger.info("Logged in as: %s", nickname)
+        logger.info("Doubao login accepted")
         return True
 
     @staticmethod
@@ -242,7 +256,7 @@ class DoubaoMurmurApp(Gtk.Application):
             self.login_window = None
 
     def _extract_params(self, callback) -> None:
-        """Retrieve params; the recording owner decides whether to save them."""
+        """Retrieve params; the Doubao session decides whether to save them."""
         if self.login_window and self.login_window.is_active:
             self.login_window.extract_params_async(callback)
         else:
@@ -289,6 +303,7 @@ class DoubaoMurmurApp(Gtk.Application):
 
     def _on_auth_expired(self) -> None:
         """Show re-login dialog."""
+        self.app_state.login_status = LoginStatus.NOT_LOGGED_IN
         dialog = Gtk.MessageDialog(
             transient_for=None,
             modal=True,

@@ -262,7 +262,7 @@ class LoginWindow:
                 None,  # user_data
             )
         except Exception as e:
-            logger.error("Cookie extraction failed: %s", e)
+            logger.error("Cookie extraction failed: %s", type(e).__name__)
             deliver(None)
 
     def _extract_local_storage(self, cookies: dict, callback, current) -> None:
@@ -313,22 +313,17 @@ class LoginWindow:
                         device_id=device_id,
                         web_id=web_id,
                     )
-                    logger.info(
-                        "Params extracted: %d cookies, device=%s, web=%s",
-                        len(cookies),
-                        device_id[:10],
-                        web_id[:10],
-                    )
+                    logger.info("ASR parameters extracted (%d cookies)", len(cookies))
                     callback(params)
                 else:
                     logger.warning(
-                        "Missing localStorage params: device=%s, web=%s",
-                        device_id,
-                        web_id,
+                        "Missing localStorage params (has device ID=%s, has web ID=%s)",
+                        bool(device_id),
+                        bool(web_id),
                     )
                     callback(None)
             except Exception as e:
-                logger.error("JS evaluation failed: %s", e)
+                logger.error("JS evaluation failed: %s", type(e).__name__)
                 callback(None)
 
         try:
@@ -342,7 +337,7 @@ class LoginWindow:
                 None,  # user_data
             )
         except Exception as e:
-            logger.error("JS evaluation failed: %s", e)
+            logger.error("JS evaluation failed: %s", type(e).__name__)
             callback(None)
 
     def _get_cookie_manager(self):

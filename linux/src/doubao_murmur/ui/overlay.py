@@ -71,10 +71,12 @@ _FAULT_TEXT = {
     SessionFault.CREDENTIAL_SAVE: "无法保存登录凭证，请重试",
     SessionFault.PARAMETER_TIMEOUT: "获取连接参数超时，请重试",
     SessionFault.CONNECTION_TIMEOUT: "连接识别服务超时，请重试",
+    SessionFault.RESPONSE_TIMEOUT: "识别服务长时间未响应，请重试",
     SessionFault.CONNECTION_FAILED: "无法连接识别服务，请检查网络后重试",
     SessionFault.DISCONNECTED: "识别连接已中断，请重试",
     SessionFault.SERVICE: "识别服务报错，请稍后重试",
     SessionFault.AUTH: "登录已失效，请重新登录",
+    SessionFault.RECOGNITION: "语音识别失败，请重试",
     SessionFault.NO_TEXT: "未收到识别文字，请检查麦克风或重试",
 }
 
@@ -129,6 +131,8 @@ class Overlay:
         self._window.set_default_size(OVERLAY_WIDTH, OVERLAY_HEIGHT)
         self._window.set_resizable(False)
         self._window.add_css_class("overlay-window")
+        self._window.connect("map", self._log_visibility, "mapped")
+        self._window.connect("unmap", self._log_visibility, "unmapped")
         apply_overlay_window_hints(self._window, OverlayRole.STATUS)
 
         box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=12)
@@ -299,7 +303,12 @@ class Overlay:
             GLib.source_remove(self._anim_timer)
             self._anim_timer = 0
         if self._window:
+            if self._window.get_visible():
+                self._log_visibility(self._window, "hide requested")
             self._window.set_visible(False)
+
+    def _log_visibility(self, _window: Gtk.Window, event: str) -> None:
+        logger.info("Recording overlay %s (state=%s)", event, self.app_state.recording_state.value)
 
     def update_text(self, text: str) -> None:
         if not self._label:

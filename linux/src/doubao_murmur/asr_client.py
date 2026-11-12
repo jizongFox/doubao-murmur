@@ -19,6 +19,7 @@ import inspect
 import json
 import logging
 import threading
+import time
 import uuid
 from typing import Any
 from urllib.parse import urlencode
@@ -35,10 +36,15 @@ from doubao_murmur.config import (
 from doubao_murmur.params_store import ASRParams
 
 logger = logging.getLogger(__name__)
+ASR_RESPONSE_TIMEOUT = 30.0
 
 
 class ASRServiceError(Exception):
     """The service returned a non-authentication error, not a network failure."""
+
+
+class ASRResponseTimeout(TimeoutError):
+    """Audio input started, but the service stopped sending ASR messages."""
 
 
 class ASRClient:
@@ -54,7 +60,13 @@ class ASRClient:
         self._thread: threading.Thread | None = None
         self._task: asyncio.Task | None = None
         self._disconnect_requested = threading.Event()
+        self._input_ended = threading.Event()
         self._terminal_reported = False
+        self._response_timer: asyncio.TimerHandle | None = None
+        self._connected_at: float | None = None
+        self._last_message_at: float | None = None
+        self._audio_chunks_sent = 0
+        self._messages_received = 0
 
         # Callbacks (called from asyncio thread - must use GLib.idle_add for GTK)
         self.on_open = None  # () -> None
@@ -94,6 +106,13 @@ class ASRClient:
         except asyncio.CancelledError:
             pass  # Explicit disconnect, including cancellation during handshake.
         finally:
+            now = time.monotonic()
+            logger.info(
+                "ASR connection summary: connected_s=%s audio_chunks_sent=%d "
+                "messages_received=%d last_message_age_s=%s",
+                _elapsed_seconds(now, self._connected_at), self._audio_chunks_sent,
+                self._messages_received, _elapsed_seconds(now, self._last_message_at),
+            )
             with self._lock:
                 self._disconnect_requested.set()
                 self._connected = False
@@ -123,6 +142,7 @@ class ASRClient:
             "Origin": ORIGIN,
         }
 
+        started_at = time.monotonic()
         logger.info("Connecting to ASR WebSocket...")
         try:
             websockets = _load_websockets()
@@ -132,6 +152,9 @@ class ASRClient:
             connect_kwargs = dict(
                 open_timeout=5,
                 close_timeout=3,
+                ping_interval=20,
+                # The service may keep responding to audio without replying to Ping.
+                ping_timeout=None,
                 max_size=2**20,
                 **header_kwargs,
             )
@@ -151,7 +174,12 @@ class ASRClient:
                         return
                     self._ws = ws
                     self._connected = True
-                logger.info("Connected")
+                self._connected_at = time.monotonic()
+                logger.info(
+                    "ASR connected: handshake_s=%s ping_interval_s=%s ping_timeout_s=%s",
+                    _elapsed_seconds(self._connected_at, started_at),
+                    getattr(ws, "ping_interval", None), getattr(ws, "ping_timeout", None),
+                )
 
                 # Flush buffered audio
                 self._flush_audio_buffer()
@@ -165,11 +193,11 @@ class ASRClient:
                         self.on_open()
 
                 # Receive loop
-                received_any = False
                 async for message in ws:
                     if self._disconnect_requested.is_set():
                         return
-                    received_any = True
+                    self._messages_received += 1
+                    self._last_message_at = time.monotonic()
                     self._handle_message(message)
                     if self._terminal_reported:
                         break
@@ -180,35 +208,37 @@ class ASRClient:
                 # ends the session, and disconnect() clears self._ws before
                 # closing, so our own closes never land here.
                 if (
-                    not received_any
+                    self._messages_received == 0
                     and not self._terminal_reported
                     and not self._disconnect_requested.is_set()
                     and self._ws is ws
                     and getattr(ws, "close_code", None) == 1000
                 ):
                     logger.warning(
-                        "Server closed the connection before sending "
-                        "anything: login expired"
+                        "ASR peer closed (code=1000) before any messages: login expired"
                     )
                     self._report_terminal(self.on_auth_error)
-                elif not self._terminal_reported:
+                elif not self._terminal_reported and not self._disconnect_requested.is_set():
+                    logger.info("ASR peer closed (code=%s)", getattr(ws, "close_code", None))
                     self._report_terminal(self.on_close)
             finally:
+                if self._response_timer is not None:
+                    self._response_timer.cancel()
                 await ws.close()
 
         except Exception as e:
-            if self._disconnect_requested.is_set():
-                return
-            logger.warning("ASR transport error: %s", e)
-            self._report_terminal(self.on_error, e)
+            operation = "connect" if self._connected_at is None else "receive"
+            self._report_terminal(self.on_error, e, transport_operation=operation)
 
-    def _report_terminal(self, callback, *args) -> None:
+    def _report_terminal(self, callback, *args, transport_operation: str | None = None) -> None:
         """Send/receive failures race; only one terminal outcome may escape."""
         with self._callback_lock:
             if self._disconnect_requested.is_set() or self._terminal_reported:
                 return
             self._terminal_reported = True
             self._connected = False
+            if transport_operation is not None:
+                _log_transport_error(transport_operation, args[0])
             if callback:
                 callback(*args)
 
@@ -216,11 +246,32 @@ class ASRClient:
         """Observe send failures instead of abandoning their Future exceptions."""
         if self._disconnect_requested.is_set() or self._terminal_reported:
             return
+        if self._response_timer is None and not self._input_ended.is_set():
+            self._response_timer = asyncio.get_running_loop().call_later(
+                ASR_RESPONSE_TIMEOUT, self._check_response_deadline, time.monotonic()
+            )
         try:
             await ws.send(data)
         except Exception as error:
-            self._report_terminal(self.on_error, error)
+            self._report_terminal(self.on_error, error, transport_operation="send")
             self._cancel_connection()
+        else:
+            self._audio_chunks_sent += 1
+
+    def _check_response_deadline(self, audio_started_at: float) -> None:
+        self._response_timer = None
+        if self._input_ended.is_set() or self._disconnect_requested.is_set() or self._terminal_reported:
+            return
+        last_activity = max(audio_started_at, self._last_message_at or audio_started_at)
+        remaining = ASR_RESPONSE_TIMEOUT - (time.monotonic() - last_activity)
+        if remaining > 0:
+            self._response_timer = asyncio.get_running_loop().call_later(
+                remaining, self._check_response_deadline, audio_started_at
+            )
+            return
+        logger.warning("No ASR messages for %.1fs after audio input began", ASR_RESPONSE_TIMEOUT)
+        self._report_terminal(self.on_error, ASRResponseTimeout(), transport_operation="receive")
+        self._cancel_connection()
 
     def _build_url(self, params: ASRParams) -> str:
         """Construct the full WSS URL with query parameters."""
@@ -265,6 +316,7 @@ class ASRClient:
         with self._lock:
             if self._disconnect_requested.is_set():
                 return
+            self._input_ended.set()
             ws = self._ws
             was_connected = self._connected
             self._connected = False
@@ -329,14 +381,15 @@ class ASRClient:
         event = data.get("event", "")
         msg = data.get("message", "")
 
-        # Detect auth errors
-        if code != 0 and _is_auth_error(code, msg):
-            logger.warning("Auth error detected: code=%s, message=%s", code, msg)
-            self._report_terminal(self.on_auth_error)
-            return
-
         if code != 0:
-            self._report_terminal(self.on_error, ASRServiceError(f"ASR code {code}"))
+            # Keep free-form server messages out of local logs.
+            log_code = code if isinstance(code, int) else "unknown"
+            if _is_auth_error(code, msg):
+                logger.warning("ASR authentication error (code=%s)", log_code)
+                self._report_terminal(self.on_auth_error)
+            else:
+                logger.warning("ASR service error (code=%s)", log_code)
+                self._report_terminal(self.on_error, ASRServiceError(f"ASR code {code}"))
             return
 
         if event == "result":
@@ -355,6 +408,39 @@ class ASRClient:
             if self.on_response:
                 self.on_response()
             self._report_terminal(self.on_finish)
+
+
+def _elapsed_seconds(now: float, since: float | None) -> str:
+    return "n/a" if since is None else f"{now - since:.3f}"
+
+
+def _log_transport_error(operation: str, error: Exception) -> None:
+    # ConnectionClosed exposes these attributes in both WebSocket clients.
+    # Avoid importing the dependency while logging a failed import.
+    if not hasattr(error, "rcvd_then_sent"):
+        logger.warning("ASR transport error: operation=%s type=%s", operation, type(error).__name__)
+        return
+
+    received, sent = error.rcvd, error.sent
+    if received is None and sent is None:
+        first = "no_close_frame"
+    elif sent is None or (received is not None and error.rcvd_then_sent is True):
+        first = "peer"
+    elif received is None or error.rcvd_then_sent is False:
+        first = "client"
+    else:
+        first = "unknown"
+    # The library uses this reason when its own Pong deadline expires.
+    # Don't print arbitrary reasons supplied by the remote peer.
+    heartbeat_timeout = (
+        first == "client" and sent.code == 1011 and sent.reason == "keepalive ping timeout"
+    )
+    logger.warning(
+        "ASR WebSocket closed: operation=%s type=%s first=%s received_code=%s "
+        "sent_code=%s heartbeat_timeout=%s",
+        operation, type(error).__name__, first, getattr(received, "code", None),
+        getattr(sent, "code", None), heartbeat_timeout,
+    )
 
 
 def _load_websockets():
