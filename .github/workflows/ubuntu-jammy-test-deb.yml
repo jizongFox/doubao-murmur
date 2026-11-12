@@ -1,0 +1,69 @@
+name: Ubuntu 22.04 test package (run logs)
+
+on:
+  push:
+    branches: [build/ubuntu-22.04-deb-run-logs]
+
+permissions:
+  contents: read
+
+jobs:
+  jammy-package:
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 2
+      - name: Build Jammy package from PR source
+        run: |
+          set -eu
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends python3-venv unzip xvfb xauth x11-utils
+          src=2e83f324f69e3b217c0d9d4350e29983d8dc956a
+          source_dir="$RUNNER_TEMP/source"
+          mkdir -p "$source_dir" "$RUNNER_TEMP/dist"
+          git archive "$src" | tar -x -C "$source_dir"
+          cp linux/debian/build-jammy.sh "$source_dir/linux/debian/"
+          /usr/bin/python3 -m venv --system-site-packages "$RUNNER_TEMP/venv"
+          "$RUNNER_TEMP/venv/bin/python" -m pip download --disable-pip-version-check --only-binary=:all: --no-deps --platform any --python-version 3.10 --dest "$RUNNER_TEMP/wheels" 'websockets==16.1.1' 'sounddevice==0.5.6' 'python-xlib==0.33'
+          export SOURCE_DATE_EPOCH="$(git show -s --format=%ct "$src")" TZ=UTC
+          sh "$source_dir/linux/debian/build-jammy.sh" "$RUNNER_TEMP/wheels" "$RUNNER_TEMP/dist"
+          sha256sum "$RUNNER_TEMP"/dist/*.deb
+      - name: Install on Jammy and verify installed dependencies
+        run: |
+          sudo apt-get install -y "$RUNNER_TEMP"/dist/*.deb
+          dpkg-query -W doubao-murmur
+          cd "$RUNNER_TEMP"
+          PYTHONPATH=/usr/lib/doubao-murmur /usr/bin/python3 - <<'PY'
+          import sys
+          import sounddevice, websockets, Xlib
+          from pathlib import Path
+          from doubao_murmur.app import DoubaoMurmurApp
+          assert sys.version_info[:2] == (3, 10), sys.version
+          for module in (sounddevice, websockets, Xlib):
+              assert Path(module.__file__).is_relative_to("/usr/lib/doubao-murmur")
+          assert sounddevice.get_portaudio_version()[0] > 0
+          PY
+      - name: Check the installed launcher creates a log
+        run: |
+          set -eu
+          state="$RUNNER_TEMP/test-state"
+          xvfb-run -a env XDG_STATE_HOME="$state" GDK_BACKEND=x11 /usr/bin/doubao-murmur --help
+          rg 'Application starting' "$state/doubao-murmur/logs"
+          rg 'Application exited \(status=0\)' "$state/doubao-murmur/logs"
+      - name: Run installed package regression and GTK smoke tests
+        env:
+          PYTHONPATH: /usr/lib/doubao-murmur
+        run: |
+          py="$RUNNER_TEMP/venv/bin/python"
+          "$py" -m pip install 'pytest==9.2.0' 'pytest-asyncio==1.4.1.post1'
+          cd "$RUNNER_TEMP"
+          "$py" -m pytest "$RUNNER_TEMP/source/linux/tests" -q
+          xvfb-run -a env GDK_BACKEND=x11 XDG_SESSION_TYPE=x11 DOUBAO_X11_SMOKE=1 WEBKIT_DISABLE_SANDBOX_THIS_IS_DANGEROUS=1 "$py" -m pytest "$RUNNER_TEMP/source/linux/tests/test_x11_smoke.py" -q
+      - name: Save verified package
+        uses: actions/upload-artifact@v4
+        with:
+          name: doubao-murmur-ubuntu-22.04-run-logs
+          path: ${{ runner.temp }}/dist/*.deb
+          if-no-files-found: error
+          retention-days: 7
