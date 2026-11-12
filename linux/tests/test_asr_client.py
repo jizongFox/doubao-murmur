@@ -454,7 +454,7 @@ class TestAudioBuffering:
 class TestConnectionLifetime:
     @pytest.mark.parametrize("audio_stage", ["buffered", "recording", "trailing"])
     def test_send_failure_is_reported_once_and_closes_worker(
-        self, client, sample_params, monkeypatch, audio_stage
+        self, client, sample_params, monkeypatch, audio_stage, caplog
     ):
         error = OSError("send failed")
 
@@ -491,6 +491,32 @@ class TestConnectionLifetime:
         client.on_error.assert_called_once_with(error)
         client.on_close.assert_not_called()
         socket.close.assert_awaited_once()
+        assert caplog.text.count("ASR transport error: operation=send type=OSError") == 1
+
+    @pytest.mark.parametrize(
+        "received_code,sent_code,peer_first,reason,expected",
+        [
+            (None, 1011, None, "keepalive ping timeout", ("client", True)),
+            (1011, 1011, True, "keepalive ping timeout", ("peer", False)),
+            (4000, 4000, True, "private peer detail", ("peer", False)),
+            (None, None, None, "", ("no_close_frame", False)),
+        ],
+    )
+    def test_close_diagnostics(
+        self, received_code, sent_code, peer_first, reason, expected, caplog
+    ):
+        exceptions = pytest.importorskip("websockets.exceptions")
+        frames = pytest.importorskip("websockets.frames")
+        received = frames.Close(received_code, reason) if received_code is not None else None
+        sent = frames.Close(sent_code, reason) if sent_code is not None else None
+        error = exceptions.ConnectionClosedError(received, sent, peer_first)
+
+        asr_client_module._log_transport_error("receive", error)
+
+        first, heartbeat = expected
+        assert f"first={first} received_code={received_code} sent_code={sent_code}" in caplog.text
+        assert f"heartbeat_timeout={heartbeat}" in caplog.text
+        assert "private peer detail" not in caplog.text
 
     @pytest.mark.parametrize("late_outcome", ["cancel", "socket", "error"])
     def test_disconnect_cancels_pending_handshake(

@@ -383,6 +383,8 @@ Flatpak 1.13 及更新版本的日志位于
 
 若录音中悬浮窗突然消失，请记录当时的时间，查看日志中前后的
 `Recording state`、`Recognition fault` 和 `Recording overlay`。
+遇到断线时，`ASR WebSocket closed` 记录关闭方向、收发关闭码及是否检测到本地心跳超时；
+`ASR connection summary` 记录连接时长、收发数量和最后一条消息距结束的时间。
 日志记录状态和错误，不记录识别内容或登录凭证。
 
 ### 启动后什么都没出现
