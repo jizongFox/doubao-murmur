@@ -46,14 +46,21 @@ class ParamsStore:
 
     @staticmethod
     def load() -> ASRParams | None:
-        path = get_params_path()
-        if not path.exists():
-            return None
         try:
-            data = json.loads(path.read_text(encoding="utf-8"))
-            return ASRParams(**data)
+            data = json.loads(get_params_path().read_text(encoding="utf-8"))
+            params = ASRParams(**data)
+            if (
+                not isinstance(params.cookies, dict)
+                or not all(isinstance(value, str) for value in params.cookies.values())
+                or not isinstance(params.device_id, str)
+                or not isinstance(params.web_id, str)
+            ):
+                raise ValueError("Invalid ASR parameter types")
+            return params
+        except FileNotFoundError:
+            return None
         except Exception as e:
-            logger.error("Failed to load params: %s", e)
+            logger.error("Failed to load ASR params: %s", type(e).__name__)
             return None
 
     @staticmethod
@@ -63,7 +70,3 @@ class ParamsStore:
             logger.info("Cleared saved params")
         except Exception as e:
             logger.error("Failed to clear params: %s", e)
-
-    @staticmethod
-    def has_saved() -> bool:
-        return get_params_path().exists()
