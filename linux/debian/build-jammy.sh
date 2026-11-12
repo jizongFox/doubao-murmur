@@ -11,7 +11,7 @@ debian_dir=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
 temp=$(mktemp -d)
 trap 'rm -rf "$temp"' EXIT HUP INT TERM
 export LC_ALL=C
-export DEB_VERSION=1.5.2-rc6+jammy.2e83f32
+export DEB_VERSION=1.5.2-rc6+jammy.1b32e5d
 
 (
   cd "$wheel_dir"

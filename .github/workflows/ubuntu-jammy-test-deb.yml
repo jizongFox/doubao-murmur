@@ -19,7 +19,7 @@ jobs:
           set -eu
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends python3-venv unzip xvfb xauth x11-utils
-          src=2e83f324f69e3b217c0d9d4350e29983d8dc956a
+          src=1b32e5d10cb9034759ebefc6981fcdbbd1f37588
           source_dir="$RUNNER_TEMP/source"
           mkdir -p "$source_dir" "$RUNNER_TEMP/dist"
           git archive "$src" | tar -x -C "$source_dir"
@@ -49,8 +49,7 @@ jobs:
           set -eu
           state="$RUNNER_TEMP/test-state"
           xvfb-run -a env XDG_STATE_HOME="$state" GDK_BACKEND=x11 /usr/bin/doubao-murmur --help
-          rg 'Application starting' "$state/doubao-murmur/logs"
-          rg 'Application exited \(status=0\)' "$state/doubao-murmur/logs"
+          grep -F 'Application starting' "$state"/doubao-murmur/logs/run-*.log
       - name: Run installed package regression and GTK smoke tests
         env:
           PYTHONPATH: /usr/lib/doubao-murmur

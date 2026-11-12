@@ -7,7 +7,6 @@ import stat
 import subprocess
 import sys
 from pathlib import Path
-from types import SimpleNamespace
 
 from doubao_murmur import run_logging
 
@@ -70,16 +69,11 @@ def test_active_run_rotates_after_two_days(tmp_path, monkeypatch, caplog):
     try:
         current = Path(handler.baseFilename)
         started = int(current.stat().st_mtime)
-        real_time = logging.handlers.time
-        clock = SimpleNamespace(
-            time=lambda: started + 2 * 86400 - 1,
-            gmtime=real_time.gmtime,
-            strftime=real_time.strftime,
-        )
-        monkeypatch.setattr(logging.handlers, "time", clock)
+        now = started + 2 * 86400 - 1
+        monkeypatch.setattr(logging.handlers.time, "time", lambda: now)
         logger.info("before two days")
         assert "before two days" in current.read_text(encoding="utf-8")
-        clock.time = lambda: started + 2 * 86400
+        now = started + 2 * 86400
         logger.info("after two days")
 
         archive, = current.parent.glob(f"{current.name}.*")
