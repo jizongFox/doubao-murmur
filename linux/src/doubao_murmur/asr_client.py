@@ -191,7 +191,8 @@ class ASRClient:
                         "anything: login expired"
                     )
                     self._report_terminal(self.on_auth_error)
-                elif not self._terminal_reported:
+                elif not self._terminal_reported and not self._disconnect_requested.is_set():
+                    logger.info("ASR peer closed (code=%s)", getattr(ws, "close_code", None))
                     self._report_terminal(self.on_close)
             finally:
                 await ws.close()
@@ -199,7 +200,7 @@ class ASRClient:
         except Exception as e:
             if self._disconnect_requested.is_set():
                 return
-            logger.warning("ASR transport error: %s", e)
+            logger.warning("ASR transport error: %s", type(e).__name__)
             self._report_terminal(self.on_error, e)
 
     def _report_terminal(self, callback, *args) -> None:
@@ -329,14 +330,15 @@ class ASRClient:
         event = data.get("event", "")
         msg = data.get("message", "")
 
-        # Detect auth errors
-        if code != 0 and _is_auth_error(code, msg):
-            logger.warning("Auth error detected: code=%s, message=%s", code, msg)
-            self._report_terminal(self.on_auth_error)
-            return
-
         if code != 0:
-            self._report_terminal(self.on_error, ASRServiceError(f"ASR code {code}"))
+            # Keep free-form server messages out of local logs.
+            log_code = code if isinstance(code, int) else "unknown"
+            if _is_auth_error(code, msg):
+                logger.warning("ASR authentication error (code=%s)", log_code)
+                self._report_terminal(self.on_auth_error)
+            else:
+                logger.warning("ASR service error (code=%s)", log_code)
+                self._report_terminal(self.on_error, ASRServiceError(f"ASR code {code}"))
             return
 
         if event == "result":

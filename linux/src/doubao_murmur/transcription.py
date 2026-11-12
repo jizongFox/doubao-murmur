@@ -151,6 +151,7 @@ class TranscriptionManager:
         if not text:
             self._show_notice(SessionFault.NO_TEXT)
             return
+        logger.info("Recognition completed (state=%s)", self.app_state.recording_state.value)
         if self.on_paste:
             self.on_paste(text)
         self._reset_to_idle()
@@ -179,6 +180,7 @@ class TranscriptionManager:
 
     def handle_cancel(self) -> None:
         if self._session is not None or self.notice_timer_id is not None:
+            logger.info("Recording cancelled (state=%s)", self.app_state.recording_state.value)
             self._reset_to_idle()
 
     def _set_state(self, new_state: RecordingState) -> None:

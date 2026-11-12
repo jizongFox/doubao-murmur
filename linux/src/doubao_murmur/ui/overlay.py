@@ -130,6 +130,8 @@ class Overlay:
         self._window.set_default_size(OVERLAY_WIDTH, OVERLAY_HEIGHT)
         self._window.set_resizable(False)
         self._window.add_css_class("overlay-window")
+        self._window.connect("map", self._log_visibility, "mapped")
+        self._window.connect("unmap", self._log_visibility, "unmapped")
         apply_overlay_window_hints(self._window, OverlayRole.STATUS)
 
         box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=12)
@@ -300,7 +302,12 @@ class Overlay:
             GLib.source_remove(self._anim_timer)
             self._anim_timer = 0
         if self._window:
+            if self._window.get_visible():
+                self._log_visibility(self._window, "hide requested")
             self._window.set_visible(False)
+
+    def _log_visibility(self, _window: Gtk.Window, event: str) -> None:
+        logger.info("Recording overlay %s (state=%s)", event, self.app_state.recording_state.value)
 
     def update_text(self, text: str) -> None:
         if not self._label:

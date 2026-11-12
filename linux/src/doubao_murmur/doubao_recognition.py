@@ -142,6 +142,7 @@ class DoubaoRecognitionSession:
 
     def _finish_after_timeout(self) -> bool:
         self._stop_timer = None
+        logger.info("ASR final result timed out after stop")
         self._callbacks.completed()
         return GLib.SOURCE_REMOVE
 
@@ -162,7 +163,7 @@ class DoubaoRecognitionSession:
             self._callbacks.failed(SessionFault.DISCONNECTED)
 
     def _on_error(self, error: Exception) -> None:
-        logger.error("ASR error: %s", error)
+        logger.error("ASR error: %s", type(error).__name__)
         if self._using_cached_params and is_handshake_auth_rejection(error):
             self._auth_failed()
             return
