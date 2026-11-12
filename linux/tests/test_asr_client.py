@@ -5,6 +5,7 @@ import contextlib
 import json
 import builtins
 import threading
+from functools import wraps
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, Mock
 
@@ -13,6 +14,7 @@ import pytest
 from doubao_murmur import asr_client as asr_client_module
 from doubao_murmur.asr_client import (
     ASRClient,
+    ASRResponseTimeout,
     ASRServiceError,
     _load_websockets,
     _websocket_header_kwargs,
@@ -452,6 +454,81 @@ class TestAudioBuffering:
 
 
 class TestConnectionLifetime:
+    def test_asr_messages_keep_recording_alive_without_pong(
+        self, client, sample_params, monkeypatch
+    ):
+        websockets = pytest.importorskip("websockets")
+        frames = pytest.importorskip("websockets.frames")
+        monkeypatch.setattr(asr_client_module, "ASR_RESPONSE_TIMEOUT", 0.5)
+        blocked_pongs = []
+        responses = []
+        client.on_open = lambda: client.send_audio(b"speech")
+        client.on_response = lambda: responses.append(True)
+        client.on_error = Mock()
+
+        @wraps(websockets.connect)
+        def connect(url, **kwargs):
+            assert kwargs["ping_interval"] == 20
+            assert kwargs["ping_timeout"] is None
+            return websockets.connect(url, **{**kwargs, "ping_interval": 0.05})
+
+        monkeypatch.setattr(
+            asr_client_module, "_load_websockets", lambda: SimpleNamespace(connect=connect)
+        )
+
+        async def handler(ws):
+            send_frame = ws.protocol.send_frame
+
+            def omit_pong(frame):
+                if frame.opcode == frames.Opcode.PONG:
+                    blocked_pongs.append(True)
+                else:
+                    send_frame(frame)
+
+            ws.protocol.send_frame = omit_pong
+            await ws.recv()
+            for _ in range(6):
+                await ws.send(json.dumps(
+                    {"code": 0, "event": "result", "result": {"Text": ""}}
+                ))
+                await asyncio.sleep(0.12)
+            await ws.wait_closed()
+
+        with local_asr_server(handler) as url:
+            monkeypatch.setattr(asr_client_module, "WSS_BASE_URL", url)
+            client.connect(sample_params)
+            client._thread.join(5)
+        assert not client._thread.is_alive()
+        assert len(responses) == 6  # Longer than one response deadline.
+        assert len(blocked_pongs) >= 3
+        client.on_error.assert_called_once()
+        assert isinstance(client.on_error.call_args.args[0], ASRResponseTimeout)
+
+    @pytest.mark.parametrize("stopped", [False, True])
+    def test_response_watchdog_only_applies_to_active_audio(
+        self, client, sample_params, monkeypatch, stopped
+    ):
+        monkeypatch.setattr(asr_client_module, "ASR_RESPONSE_TIMEOUT", 0.1)
+        client.on_error = Mock()
+        client.on_finish = Mock()
+        if stopped:
+            client.on_open = lambda: client.send_audio(b"speech")
+
+        async def handler(ws):
+            if stopped:
+                await ws.recv()
+                client.finish_sending()
+            await asyncio.sleep(0.25)
+            await ws.send(json.dumps({"code": 0, "event": "finish"}))
+
+        with local_asr_server(handler) as url:
+            monkeypatch.setattr(asr_client_module, "WSS_BASE_URL", url)
+            client.connect(sample_params)
+            client._thread.join(5)
+        assert not client._thread.is_alive()
+        client.on_error.assert_not_called()
+        client.on_finish.assert_called_once()
+
     @pytest.mark.parametrize("audio_stage", ["buffered", "recording", "trailing"])
     def test_send_failure_is_reported_once_and_closes_worker(
         self, client, sample_params, monkeypatch, audio_stage, caplog

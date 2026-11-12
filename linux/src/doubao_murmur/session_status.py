@@ -23,6 +23,7 @@ class SessionFault(Enum):
     CREDENTIAL_SAVE = "credential_save"
     PARAMETER_TIMEOUT = "parameter_timeout"
     CONNECTION_TIMEOUT = "connection_timeout"
+    RESPONSE_TIMEOUT = "response_timeout"
     CONNECTION_FAILED = "connection_failed"
     DISCONNECTED = "disconnected"
     SERVICE = "service"

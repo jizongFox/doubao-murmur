@@ -71,6 +71,7 @@ _FAULT_TEXT = {
     SessionFault.CREDENTIAL_SAVE: "无法保存登录凭证，请重试",
     SessionFault.PARAMETER_TIMEOUT: "获取连接参数超时，请重试",
     SessionFault.CONNECTION_TIMEOUT: "连接识别服务超时，请重试",
+    SessionFault.RESPONSE_TIMEOUT: "识别服务长时间未响应，请重试",
     SessionFault.CONNECTION_FAILED: "无法连接识别服务，请检查网络后重试",
     SessionFault.DISCONNECTED: "识别连接已中断，请重试",
     SessionFault.SERVICE: "识别服务报错，请稍后重试",

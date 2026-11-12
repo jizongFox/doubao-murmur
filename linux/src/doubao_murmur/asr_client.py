@@ -36,10 +36,15 @@ from doubao_murmur.config import (
 from doubao_murmur.params_store import ASRParams
 
 logger = logging.getLogger(__name__)
+ASR_RESPONSE_TIMEOUT = 30.0
 
 
 class ASRServiceError(Exception):
     """The service returned a non-authentication error, not a network failure."""
+
+
+class ASRResponseTimeout(TimeoutError):
+    """Audio input started, but the service stopped sending ASR messages."""
 
 
 class ASRClient:
@@ -55,7 +60,9 @@ class ASRClient:
         self._thread: threading.Thread | None = None
         self._task: asyncio.Task | None = None
         self._disconnect_requested = threading.Event()
+        self._input_ended = threading.Event()
         self._terminal_reported = False
+        self._response_timer: asyncio.TimerHandle | None = None
         self._connected_at: float | None = None
         self._last_message_at: float | None = None
         self._audio_chunks_sent = 0
@@ -145,6 +152,9 @@ class ASRClient:
             connect_kwargs = dict(
                 open_timeout=5,
                 close_timeout=3,
+                ping_interval=20,
+                # The service may keep responding to audio without replying to Ping.
+                ping_timeout=None,
                 max_size=2**20,
                 **header_kwargs,
             )
@@ -212,6 +222,8 @@ class ASRClient:
                     logger.info("ASR peer closed (code=%s)", getattr(ws, "close_code", None))
                     self._report_terminal(self.on_close)
             finally:
+                if self._response_timer is not None:
+                    self._response_timer.cancel()
                 await ws.close()
 
         except Exception as e:
@@ -234,6 +246,10 @@ class ASRClient:
         """Observe send failures instead of abandoning their Future exceptions."""
         if self._disconnect_requested.is_set() or self._terminal_reported:
             return
+        if self._response_timer is None and not self._input_ended.is_set():
+            self._response_timer = asyncio.get_running_loop().call_later(
+                ASR_RESPONSE_TIMEOUT, self._check_response_deadline, time.monotonic()
+            )
         try:
             await ws.send(data)
         except Exception as error:
@@ -241,6 +257,21 @@ class ASRClient:
             self._cancel_connection()
         else:
             self._audio_chunks_sent += 1
+
+    def _check_response_deadline(self, audio_started_at: float) -> None:
+        self._response_timer = None
+        if self._input_ended.is_set() or self._disconnect_requested.is_set() or self._terminal_reported:
+            return
+        last_activity = max(audio_started_at, self._last_message_at or audio_started_at)
+        remaining = ASR_RESPONSE_TIMEOUT - (time.monotonic() - last_activity)
+        if remaining > 0:
+            self._response_timer = asyncio.get_running_loop().call_later(
+                remaining, self._check_response_deadline, audio_started_at
+            )
+            return
+        logger.warning("No ASR messages for %.1fs after audio input began", ASR_RESPONSE_TIMEOUT)
+        self._report_terminal(self.on_error, ASRResponseTimeout(), transport_operation="receive")
+        self._cancel_connection()
 
     def _build_url(self, params: ASRParams) -> str:
         """Construct the full WSS URL with query parameters."""
@@ -285,6 +316,7 @@ class ASRClient:
         with self._lock:
             if self._disconnect_requested.is_set():
                 return
+            self._input_ended.set()
             ws = self._ws
             was_connected = self._connected
             self._connected = False

@@ -10,7 +10,9 @@ from dataclasses import replace
 
 from gi.repository import GLib
 
-from doubao_murmur.asr_client import ASRClient, ASRServiceError, is_handshake_auth_rejection
+from doubao_murmur.asr_client import (
+    ASRClient, ASRResponseTimeout, ASRServiceError, is_handshake_auth_rejection,
+)
 from doubao_murmur.params_store import ASRParams, ParamsStore
 from doubao_murmur.recognition import RecognitionCallbacks
 from doubao_murmur.session_status import ConnectionPhase, SessionFault, SessionStatus
@@ -169,6 +171,8 @@ class DoubaoRecognitionSession:
             return
         if isinstance(error, ASRServiceError):
             fault = SessionFault.SERVICE
+        elif isinstance(error, ASRResponseTimeout):
+            fault = SessionFault.RESPONSE_TIMEOUT
         elif isinstance(error, (TimeoutError, asyncio.TimeoutError)):
             fault = SessionFault.CONNECTION_TIMEOUT
         elif self._status.phase == ConnectionPhase.CONNECTED:
