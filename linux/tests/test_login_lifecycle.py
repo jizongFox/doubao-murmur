@@ -10,7 +10,7 @@ pytest.importorskip("gi")
 
 from doubao_murmur import app as app_module, doubao_recognition, transcription
 from doubao_murmur.app_state import LoginStatus, RecordingState
-from doubao_murmur.config import SESSION_NOTICE_DURATION
+from doubao_murmur.config import SESSION_NOTICE_DURATION, get_params_path
 from doubao_murmur.params_store import ASRParams, ParamsStore
 from doubao_murmur.session_status import SessionFault
 from doubao_murmur.ui import login_window as browser
@@ -461,13 +461,15 @@ def test_real_store_reports_write_failure(monkeypatch):
     assert ParamsStore.save(ASRParams({}, "d", "w")) is False
 
 
-@pytest.mark.parametrize("cached", [False, True])
-def test_startup_and_recording_keep_first_and_return_login_paths(session, monkeypatch, cached):
+@pytest.mark.parametrize("cache", ["missing", "valid", "corrupt", "corrupt_after_startup"])
+def test_startup_and_recording_keep_first_and_return_login_paths(session, monkeypatch, cache):
     app, glib = session
     app.login_window.destroy()
     params = ASRParams({"sessionid": "test-only"}, "d", "w")
-    if cached:
+    if cache in ("valid", "corrupt_after_startup"):
         ParamsStore.save(params)
+    elif cache == "corrupt":
+        get_params_path().write_text("{", encoding="utf-8")
     for name in ("Overlay", "KeyboardWindow", "TrayIcon", "HotkeyManager"):
         monkeypatch.setattr(app_module, name, Mock())
     monkeypatch.setattr(app_module.X11KeyListener, "is_available", lambda: False)
@@ -477,6 +479,13 @@ def test_startup_and_recording_keep_first_and_return_login_paths(session, monkey
     monkeypatch.setattr(doubao_recognition, "GLib", glib)
     app._setup_components()
     assert app.login_window is None
+    assert app.app_state.login_status == (
+        LoginStatus.LOGGED_IN
+        if cache in ("valid", "corrupt_after_startup")
+        else LoginStatus.NOT_LOGGED_IN
+    )
+    if cache == "corrupt_after_startup":
+        get_params_path().write_text("{", encoding="utf-8")
     # Both availability probes above report False at login. Retain the backend
     # candidates so HotkeyManager can retry after the session becomes ready.
     backends = app.hotkey_manager.start.call_args.kwargs
@@ -484,7 +493,7 @@ def test_startup_and_recording_keep_first_and_return_login_paths(session, monkey
     assert isinstance(backends["evdev_listener"], app_module.EvdevListener)
     manager = app.transcription_manager
     manager.handle_start()
-    if cached:
+    if cache == "valid":
         assert app.app_state.login_status == LoginStatus.LOGGED_IN
         doubao_recognition.ASRClient.return_value.connect.assert_called_once_with(params)
         assert app.login_window is None
@@ -492,4 +501,5 @@ def test_startup_and_recording_keep_first_and_return_login_paths(session, monkey
         assert app.app_state.login_status == LoginStatus.NOT_LOGGED_IN
         doubao_recognition.ASRClient.return_value.connect.assert_not_called()
         manager.audio_capture.start.assert_not_called()
+        assert app.app_state.recording_state == RecordingState.IDLE
         assert app.login_window.is_active

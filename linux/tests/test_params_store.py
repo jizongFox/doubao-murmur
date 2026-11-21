@@ -1,9 +1,6 @@
 """Tests for ParamsStore."""
 
 import json
-import os
-import tempfile
-from pathlib import Path
 
 import pytest
 
@@ -59,19 +56,20 @@ def test_clear():
 
     params = ASRParams(cookies={"a": "1"}, device_id="d", web_id="w")
     ParamsStore.save(params)
-    assert ParamsStore.has_saved()
+    assert ParamsStore.load() == params
 
     ParamsStore.clear()
-    assert not ParamsStore.has_saved()
     assert ParamsStore.load() is None
 
 
-def test_has_saved():
+@pytest.mark.parametrize("contents", [
+    "{",
+    json.dumps({"cookies": [], "device_id": "d", "web_id": "w"}),
+    json.dumps({"cookies": {"sessionid": None}, "device_id": "d", "web_id": "w"}),
+    json.dumps({"cookies": {}, "device_id": 1, "web_id": "w"}),
+])
+def test_load_invalid_cache(contents):
     from doubao_murmur.params_store import ParamsStore
 
-    assert not ParamsStore.has_saved()
-
-    from doubao_murmur.params_store import ASRParams
-
-    ParamsStore.save(ASRParams(cookies={"a": "1"}, device_id="d", web_id="w"))
-    assert ParamsStore.has_saved()
+    config.get_params_path().write_text(contents, encoding="utf-8")
+    assert ParamsStore.load() is None

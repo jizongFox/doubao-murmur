@@ -87,7 +87,7 @@ def recording(monkeypatch, extract_params, auth_expired):
 
     def create_session(callbacks):
         return DoubaoRecognitionSession(
-            callbacks, extract_params=extract_params,
+            callbacks, cached_params=cloud.ParamsStore.load(), extract_params=extract_params,
             save_params=cloud.ParamsStore.save, on_auth_expired=reauthenticate,
         )
 
@@ -308,18 +308,6 @@ def test_cancel_discards_pending_completion(recording):
     manager.on_paste.assert_not_called()
 
 
-def test_delayed_clear_does_not_erase_next_recording(recording):
-    manager, glib, clients = recording
-    manager.handle_start()
-    manager.handle_cancel()
-    manager.handle_start()
-    clients[-1].on_result("new recording")
-    glib.advance(0)
-    glib.advance(200)
-
-    assert manager.app_state.transcription_text == "new recording"
-
-
 def test_old_error_reset_does_not_stop_next_recording(recording):
     manager, glib, clients = recording
     manager.handle_start()
@@ -347,18 +335,17 @@ def test_error_reset_still_returns_to_idle(recording):
     cloud.ParamsStore.clear.assert_not_called()
 
 
-def test_idle_text_is_still_cleared_after_delay(recording):
+def test_cancel_hides_overlay_and_clears_transcript_without_delivering(recording):
     manager, glib, clients = recording
     manager.handle_start()
     clients[-1].on_result("cancelled text")
     glib.advance(0)
     manager.handle_cancel()
-    glib.advance(199)
-    assert manager.app_state.transcription_text == "cancelled text"
-
-    glib.advance(1)
 
     assert manager.app_state.transcription_text == ""
+    manager.on_overlay_hide.assert_called_once()
+    manager.on_copy.assert_not_called()
+    manager.on_paste.assert_not_called()
 
 
 def test_repeated_errors_have_one_reset(recording):

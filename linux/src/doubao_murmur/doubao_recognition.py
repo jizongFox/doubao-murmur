@@ -31,16 +31,17 @@ class DoubaoRecognitionSession:
         self,
         callbacks: RecognitionCallbacks,
         *,
+        cached_params: ASRParams | None,
         extract_params: Callable[[Callable[[ASRParams | None], None]], None],
         save_params: Callable[[ASRParams], bool],
         on_auth_expired: Callable[[], None],
     ) -> None:
         self._callbacks = callbacks
+        self._cached_params = cached_params
         self._extract_params = extract_params
         self._save_params = save_params
         self._on_auth_expired = on_auth_expired
         self._status = SessionStatus()
-        self._using_cached_params = False
         self._input_ended = False
         self._closed = False
         self._start_timer: int | None = None
@@ -69,10 +70,8 @@ class DoubaoRecognitionSession:
         self._start_timer = GLib.timeout_add(
             int(SESSION_START_TIMEOUT * 1000), self._start_timeout
         )
-        cached = ParamsStore.load()
-        if cached:
-            self._using_cached_params = True
-            self._connect(cached)
+        if self._cached_params is not None:
+            self._connect(self._cached_params)
         else:
             self._extract_params(self._on_params)
 
@@ -166,7 +165,7 @@ class DoubaoRecognitionSession:
 
     def _on_error(self, error: Exception) -> None:
         logger.error("ASR error: %s", type(error).__name__)
-        if self._using_cached_params and is_handshake_auth_rejection(error):
+        if self._cached_params is not None and is_handshake_auth_rejection(error):
             self._auth_failed()
             return
         if isinstance(error, ASRServiceError):
